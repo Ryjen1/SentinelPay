@@ -1,8 +1,6 @@
 # SentinelPay: The Guardian Protocol for Celo AI Agents
 
-[![Track 2: Best Agent Infra](https://img.shields.io/badge/Hackathon-Track%202-blueviolet?style=for-the-badge)](https://celoplatform.notion.site/Build-Agents-for-the-Real-World-Celo-Hackathon-V2-2fdd5cb803de80c99010c04b6902a3a9)
-
-SentinelPay (powered by the **Guardian Protocol**) is a security-first infrastructure layer for autonomous AI agents on Celo. It provides a deterministic, on-chain execution environment that separates **Financial Authority** (Smart Contracts) from **Agent Logic** (AI).
+SentinelPay (powered by the **Guardian Protocol**) is a security-first infrastructure layer for autonomous AI agents on Celo. It provides deterministic, on-chain policy enforcement that separates **Financial Authority** (Smart Contracts) from **Agent Logic** (AI). Policies are configured by an owner wallet and enforced by the network.
 
 [**View Complete Architecture & Life of a Payment**](docs/ARCHITECTURE.md)
 
@@ -13,16 +11,16 @@ AI agents are rapidly becoming autonomous, but they lack standard, trustless gua
 - **Opacity:** No verifiable on-chain reputation for "good acting" agents.
 
 ## The Solution: Guardian Protocol
-SentinelPay adds an immutable on-chain policy gate via the `SentinelVault` contract. It maps to the **ERC-8004 "Trustless Agents"** standard to give agents a verifiable identity and reputation.
+SentinelPay adds an on-chain policy gate via the `SentinelVault` contract. Policies are keyed by `agent_id` and enforced on-chain; **ERC-8004 identity/reputation hooks are a roadmap item**.
 
 ### Our Innovation
 - **Deterministic Enforcement:** Limits are enforced by Celo smart contracts, not just backend logic.
-- **ERC-8004 Native:** Built-in support for agent identity and reputation tracking.
-- **Defense in Depth:** HMAC signing, idempotency protection, and on-chain whitelisting.
+- **ERC-8004-aligned (Roadmap):** Identity and reputation integration planned.
+- **Defense in Depth (Optional):** HMAC signing, idempotency protection, and on-chain whitelisting when enabled.
 
 ## Architecture at a Glance
 ```
-AI Agent -> Python SDK -> SentinelPay API -> SentinelVault (On-Chain Policy) -> Celo (USDC)
+AI Agent -> Python SDK -> SentinelPay API (operator wallet) -> SentinelVault (On-Chain Policy) -> Celo (USDC)
 ```
 > [!TIP]
 > **Check out [ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed sequence diagram of the payment flow.**
@@ -49,14 +47,13 @@ npm run dev
 BACKEND_URL=http://127.0.0.1:8000 python3 ../backend/scripts/run_execute_demo.py
 ```
 
-## Hackathon Fast Path
-Use these assets for a clean submission/demo:
+## Integration & Verification
 
-- Demo script: `docs/HACKATHON_DEMO_SCRIPT.md`
-- Judge one-pager: `docs/JUDGE_ONE_PAGER.md`
-- Smoke checker:
-  - dry: `python3 backend/scripts/hackathon_smoke.py --base-url http://127.0.0.1:8000`
-  - full (real tx): `python3 backend/scripts/hackathon_smoke.py --execute-demo --base-url http://127.0.0.1:8000`
+To verify your environment is correctly configured:
+- Demo guide: [DEMO_GUIDE.md](docs/DEMO_GUIDE.md)
+- Automated verification:
+  - dry run: `python3 backend/scripts/smoke_test.py --base-url http://127.0.0.1:8000`
+  - full (real tx): `python3 backend/scripts/smoke_test.py --execute-demo --base-url http://127.0.0.1:8000`
 
 ## SDK (Python)
 ```python
@@ -81,7 +78,7 @@ print(tx, executions)
 - `GET /payment-jobs` — queued/retried/dead-letter payment jobs
 
 ## Production Hardening Flags
-Set these in `backend/.env` for production deployments:
+Set these in `backend/.env` for production deployments (optional toggles; defaults are relaxed for demo):
 
 - `REQUIRE_OPERATOR_AUTH=true`
 - `OPERATOR_API_KEYS=<comma-separated-long-random-keys>`
@@ -105,20 +102,20 @@ When enabled:
   - `GET /payment-jobs/{job_key}`
 
 ## Competitive Differentiation
-| Capability | SentinelPay | Gnosis Safe Limits | ERC-4337 Paymasters |
+| Capability | SentinelPay (MVP) | Gnosis Safe Limits | ERC-4337 Paymasters |
 |---|---|---|---|
-| **ERC-8004 "Trustless Agent" Native** | ✅ | ❌ | ❌ |
+| **ERC-8004-aligned (Roadmap)** | ⚠️ | ❌ | ❌ |
 | Designed for AI agents (not humans) | ✅ | ❌ | ⚠️ |
 | On-chain policy enforcement | ✅ | ⚠️ | ⚠️ |
-| Backend-agnostic execution | ✅ | ❌ | ⚠️ |
-| Real-time event indexing & Agent reputation | ✅ | ❌ | ❌ |
+| Backend-agnostic execution | ⚠️ | ❌ | ⚠️ |
+| Execution logging & audit trail | ✅ | ⚠️ | ⚠️ |
 | Machine-to-machine native | ✅ | ❌ | ⚠️ |
 | Celo-native | ✅ | ⚠️ | ⚠️ |
 
+_Note: MVP execution is initiated by the operator wallet in the backend; backend-agnostic execution is a roadmap target._
+
 ## Roadmap
-- Wave 1 (Current) — Core infrastructure: SentinelVault contract, policy enforcement, execution indexing, observability dashboard
-- Wave 2 (Next) — Developer SDK release, multi-agent support (multiple agent_ids per vault), automated event polling replacing manual trigger
+- Wave 1 (Current) — Core infrastructure: SentinelVault contract, policy enforcement, execution logging, observability dashboard
+- Wave 2 (Next) — SDK polish, multi-agent UX (multiple agent_ids per vault), automated event polling replacing manual trigger
 - Wave 3 — Celo mainnet deployment, first external developer integrations, agent marketplace prototype
 - Wave 4 — Cross-chain agent execution support, DAO-controlled policy governance, production SLA
-# SentinelPay
-# SentinelPay
