@@ -1,4 +1,4 @@
-# SentinelPay: Guardian Protocol Architecture
+# SentinelPay: Architecture
 
 SentinelPay is built as a layered infrastructure to provide maximum security for autonomous AI agents on Celo. It separates **Decision Authority** (the Agent) from **Financial Authority** (the Smart Contract).
 

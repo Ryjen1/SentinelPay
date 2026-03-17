@@ -1,6 +1,6 @@
-# SentinelPay: The Guardian Protocol for Celo AI Agents
+# SentinelPay: Policy-Enforced Payments for Celo AI Agents
 
-SentinelPay (powered by the **Guardian Protocol**) is a security-first infrastructure layer for autonomous AI agents on Celo. It provides deterministic, on-chain policy enforcement that separates **Financial Authority** (Smart Contracts) from **Agent Logic** (AI). Policies are configured by an owner wallet and enforced by the network.
+SentinelPay is a security-first infrastructure layer for autonomous AI agents on Celo. It provides deterministic, on-chain policy enforcement that separates **Financial Authority** (Smart Contracts) from **Agent Logic** (AI). Policies are configured by an owner wallet and enforced by the network.
 
 [**View Complete Architecture & Life of a Payment**](docs/ARCHITECTURE.md)
 
@@ -10,7 +10,7 @@ AI agents are rapidly becoming autonomous, but they lack standard, trustless gua
 - **Security Breach:** Private keys being leaked from agent runtimes.
 - **Opacity:** No verifiable on-chain reputation for "good acting" agents.
 
-## The Solution: Guardian Protocol
+## The Solution: SentinelPay Policy Engine
 SentinelPay adds an on-chain policy gate via the `SentinelVault` contract. Policies are keyed by `agent_id` and enforced on-chain; **ERC-8004 identity/reputation hooks are a roadmap item**.
 
 ### Our Innovation
