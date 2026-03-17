@@ -1,0 +1,17 @@
+.env
+backend/.env
+contracts/.env
+frontend/.env.local
+*.log
+node_modules/
+__pycache__/
+*.pyc
+.next/
+*.db
+artifacts/
+cache/
+deployed-addresses.json
+venv/
+backend/venv/
+backend/db/transactions.db
+.vercel
