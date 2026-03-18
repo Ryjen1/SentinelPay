@@ -15,17 +15,22 @@ import httpx
 from dotenv import load_dotenv
 
 # Load environment variables from backend/.env first, then root .env as fallback.
+# On Vercel, we prioritize the project environment variables.
+is_vercel = os.getenv("VERCEL") == "1"
 backend_env_path = Path(__file__).resolve().parent.parent / ".env"
 root_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
-load_dotenv(dotenv_path=backend_env_path, override=True)
-load_dotenv(dotenv_path=root_env_path, override=True)
+
+if not is_vercel:
+    load_dotenv(dotenv_path=backend_env_path, override=False)
+    load_dotenv(dotenv_path=root_env_path, override=False)
 
 # Environment variables
 ALCHEMY_RPC = os.getenv("CELO_RPC") or os.getenv("ALCHEMY_RPC")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 AGENT_VAULT_ADDRESS = os.getenv("AGENT_VAULT_ADDRESS")
 USDC_ADDRESS = os.getenv("USDC_ADDRESS") or os.getenv("PAYMENT_TOKEN_ADDRESS")
-BACKEND_URL = "http://127.0.0.1:8000"
+# Backend URL for internal SDK calls (should be the public URL on Vercel)
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 NETWORK_NAME = os.getenv("NETWORK_NAME", "Celo Sepolia")
 CHAIN_ID = int(os.getenv("CHAIN_ID", "11142220"))
 
@@ -50,9 +55,11 @@ def get_w3():
     global w3
     if w3 is None and not MOCK_MODE:
         if not ALCHEMY_RPC:
-            print("[error] CELO_RPC not set")
+            print("[get_w3] ERROR: CELO_RPC not set")
             return None
-        w3 = Web3(Web3.HTTPProvider(ALCHEMY_RPC))
+        print(f"[get_w3] Initializing Web3 with RPC: {ALCHEMY_RPC[:20]}...")
+        # Add a 30-second timeout for better resilience in serverless environments
+        w3 = Web3(Web3.HTTPProvider(ALCHEMY_RPC, request_kwargs={'timeout': 30}))
     return w3
 
 def get_account():

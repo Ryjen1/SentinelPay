@@ -38,8 +38,12 @@ from sdk.sentinelpay_client import (
     NETWORK_NAME,
 )
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=True)
-load_dotenv(override=True)
+# Environment setup: Priority is process env (Vercel), then local .env
+is_vercel = os.getenv("VERCEL") == "1"
+if not is_vercel:
+    load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=False)
+    load_dotenv(override=False)
+
 print(f"[startup] VAULT_ADDRESS={AGENT_VAULT_ADDRESS}")
 print(f"[startup] RPC configured: {bool(ALCHEMY_RPC)}")
 print(f"[startup] PRIVATE_KEY configured: {bool(PRIVATE_KEY)}")
@@ -2730,26 +2734,21 @@ async def db_status():
 
 
 @app.get("/health")
-async def health_check():
-    dead_letter_count = 0
-    try:
-        dead_letter_rows = await db.fetch_payment_jobs(status="dead_letter", limit=1)
-        dead_letter_count = len(dead_letter_rows)
-    except Exception:
-        dead_letter_count = -1
-
+async def health():
     return {
         "status": "ok",
         "network": NETWORK_LABEL,
-        "database": db.backend,
+        "database": db.backend if db else "unknown",
         "mock_mode": MOCK_MODE,
+        "vault_address": AGENT_VAULT_ADDRESS,
+        "policy_registry": POLICY_REGISTRY_ADDRESS,
+        "rpc_url_masked": f"{ALCHEMY_RPC[:20]}..." if ALCHEMY_RPC else None,
         "operator_auth_required": REQUIRE_OPERATOR_AUTH,
         "idempotency_key_required": REQUIRE_IDEMPOTENCY_KEY,
         "agent_signature_required": REQUIRE_AGENT_SIGNATURE,
         "wallet_signature_required": REQUIRE_WALLET_SIGNATURE,
         "payment_worker_enabled": PAYMENT_WORKER_ENABLED,
-        "payment_worker_running": bool(PAYMENT_WORKER_TASK) if PAYMENT_WORKER_ENABLED else False,
-        "dead_letter_count_probe": dead_letter_count,
+        "payment_worker_running": PAYMENT_WORKER_TASK is not None,
     }
 
 
