@@ -13,6 +13,7 @@ contract PolicyRegistry is Ownable {
     }
 
     mapping(bytes32 => Policy) private policies;
+    mapping(bytes32 => mapping(address => bool)) private _whitelisted;
 
     // Custom errors
     error AgentNotFound();
@@ -45,6 +46,10 @@ contract PolicyRegistry is Ownable {
         policy.isActive = true;
         policy.registeredAt = block.timestamp;
 
+        for (uint256 i = 0; i < whitelist.length; i++) {
+            _whitelisted[agentId][whitelist[i]] = true;
+        }
+
         emit AgentRegistered(agentId, maxPerTx, dailyCap);
     }
 
@@ -70,6 +75,7 @@ contract PolicyRegistry is Ownable {
         }
 
         policies[agentId].whitelist.push(recipient);
+        _whitelisted[agentId][recipient] = true;
 
         emit WhitelistUpdated(agentId, recipient);
     }
@@ -103,12 +109,6 @@ contract PolicyRegistry is Ownable {
     }
 
     function isWhitelisted(bytes32 agentId, address recipient) external view returns (bool) {
-        address[] memory whitelist = policies[agentId].whitelist;
-        for (uint256 i = 0; i < whitelist.length; i++) {
-            if (whitelist[i] == recipient) {
-                return true;
-            }
-        }
-        return false;
+        return _whitelisted[agentId][recipient];
     }
 }
