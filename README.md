@@ -30,6 +30,7 @@ By separating **Agent Logic** (the AI) from **Financial Authority** (the Smart C
 - **Async-First Infrastructure:** Engineered for modern agent frameworks (Langchain, CrewAI) with a high-performance, non-blocking Python SDK.
 - **Gas-Optimized Architecture:** $O(1)$ whitelist verification ensures that scaling your agent's ecosystem doesn't scale your infrastructure costs.
 - **Celo-Native Speed & Stability:** Leverages Celo's sub-second finality and the USDC stablecoin ecosystem for instantaneous, reliable payments.
+- **ERC-8004 Agent Identity:** SentinelPay agents are registered on the ERC-8004 IdentityRegistry, giving each agent a verifiable on-chain identity for discovery and trust across the Celo ecosystem.
 
 ---
 
@@ -54,6 +55,22 @@ SentinelPay implements a multi-layered security model:
 - **Near-Instant Settlement:** AI agents require rapid feedback loops. Celo's block times are perfect for real-time agentic commerce.
 - **Stablecoin First:** Built-in USDC support ensures that agent policies are defined in stable values, not volatile gas tokens.
 - **Ultra-Low Fees:** Allows for high-frequency micro-payments (e.g., $0.05 per API call) that would be impossible on most other chains.
+
+---
+
+## 🪪 On-Chain Agent Identity (ERC-8004)
+
+SentinelPay agents are registered on the **ERC-8004 IdentityRegistry** — Celo's standard for trustless, discoverable AI agents.
+
+| Field | Value |
+|---|---|
+| **Agent** | `weather_agent` |
+| **AgentId** | `#57` |
+| **Registry** | [`0x8004A818...`](https://sepolia.celoscan.io/address/0x8004A818BFB912233c491871b3d84c89A494BD9e) |
+| **Metadata** | [agent-metadata.json](docs/agent-metadata.json) |
+| **Tx** | [`0x433b569b...`](https://sepolia.celoscan.io/tx/0x433b569b03a4c896507d57b0d095c1cf0d869f95313a1041a0ab32f06ed53c5d) |
+
+Any protocol or marketplace on Celo can **discover, verify, and trust** SentinelPay agents without needing off-chain coordination.
 
 ---
 
