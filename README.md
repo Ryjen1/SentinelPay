@@ -1,121 +1,117 @@
-# SentinelPay: Policy-Enforced Payments for Celo AI Agents
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Code4livingg/sentinelpay/main/frontend/public/favicon.ico" alt="SentinelPay Logo" width="80" height="80">
+  
+  # SentinelPay
+  
+  **Secure, On-Chain Policy Enforcement for Celo AI Agents**
 
-SentinelPay is a security-first infrastructure layer for autonomous AI agents on Celo. It provides deterministic, on-chain policy enforcement that separates **Financial Authority** (Smart Contracts) from **Agent Logic** (AI). Policies are configured by an owner wallet and enforced by the network.
+  [![Deploy on Vercel](https://vercelbadge.vercel.app/api/Code4livingg/sentinelpay)](https://sentinelpay.vercel.app/)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+  [![Celo Sepolia](https://img.shields.io/badge/Network-Celo%20Sepolia-33d399.svg)](https://celoscan.io/)
 
-[**View Complete Architecture & Life of a Payment**](docs/ARCHITECTURE.md)
+  *Built for the **Celo Hackathon: Track 2 (Agent Infrastructure)***
 
-## The Problem
-AI agents are rapidly becoming autonomous, but they lack standard, trustless guardrails. Giving an agent a private key is a "blind trust" model — leading to risks like:
-- **Policy Drift:** AI logic errors causing overspending.
-- **Security Breach:** Private keys being leaked from agent runtimes.
-- **Opacity:** No verifiable on-chain reputation for "good acting" agents.
+  [**Live Web Demo**](https://sentinelpay.vercel.app/) • [**Architecture Docs**](docs/ARCHITECTURE.md) • [**SDK Guide**](docs/DEMO_GUIDE.md)
+</div>
 
-## The Solution: SentinelPay Policy Engine
-SentinelPay adds an on-chain policy gate via the `SentinelVault` contract. Policies are keyed by `agent_id` and enforced on-chain; **ERC-8004 identity/reputation hooks are a roadmap item**.
+---
 
-### Our Innovation
-- **Deterministic Enforcement:** Limits are enforced by Celo smart contracts, not just backend logic.
-- **ERC-8004-aligned (Roadmap):** Identity and reputation integration planned.
-- **Defense in Depth (Optional):** HMAC signing, idempotency protection, and on-chain whitelisting when enabled.
+## 🚀 The Problem: Blind Trust in AI
 
-## Architecture at a Glance
+AI agents are rapidly becoming autonomous and integrating into financial workflows. But currently, giving an AI agent the ability to spend money means giving it a private key in a "blind trust" model. This leads to critical risks:
+- **Policy Drift:** AI hallucinations causing massive overspending or draining of funds.
+- **Security Breaches:** Private keys hardcoded in agent runtimes being leaked.
+- **Opacity:** No verifiable on-chain audit trail for "good acting" agents.
+
+## 🛡️ The Solution: SentinelPay
+
+SentinelPay is a security-first infrastructure layer that separates **Financial Authority** (Smart Contracts) from **Agent Logic** (AI).
+
+By moving the policy engine on-chain, SentinelPay guarantees deterministic, trustless execution. Operators set the rules; the blockchain enforces them. Even if an AI agent goes completely rogue, the financial blast radius is strictly contained.
+
+### Track 2 (Agent Infra) Optimizations
+We have hyper-optimized SentinelPay to serve as the foundational infrastructure for thousands of Celo agents:
+* ⚡ **$O(1)$ Gas Efficiency:** The `PolicyRegistry.sol` whitelist engine uses a nested mapping for instantaneous, $O(1)$ on-chain verifications, keeping infrastructure costs negligible.
+* 🚀 **Async-First Python SDK:** Includes `AsyncSentinelPayClient` built on `httpx`. Since modern agent frameworks (Langchain, AutoGPT) are async-native, this allows developers to seamlessly drop SentinelPay into their non-blocking event loops.
+* 🛡️ **Defense in Depth:** Dual-layer security featuring HMAC/idempotency request signatures off-chain, backed by immutable smart contract constraints on-chain.
+
+---
+
+## 🏗️ Architecture
+
+```mermaid
+graph LR
+    A[AI Agent] -->|Async SDK| B(Backend Relayer)
+    B -->|X-Payment-Proof| C{External API}
+    B -->|Operator Key| D[SentinelVault]
+    D -.->|Checks limits| E[(PolicyRegistry)]
+    D -->|Executes transfer| F[USDC Token]
 ```
-AI Agent -> Python SDK -> SentinelPay API (operator wallet) -> SentinelVault (On-Chain Policy) -> Celo (USDC)
-```
-> [!TIP]
-> **Check out [ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed sequence diagram of the payment flow.**
 
-## Quickstart
+1. **User / Operator Layer:** A physical user funds the `SentinelVault` and configures the `PolicyRegistry` on-chain (max per tx, daily caps, whitelists).
+2. **AI Agent Layer (`AsyncSentinelPayClient`):** The agent requests a payment via the backend using secure HMAC signatures. It never touches a private key.
+3. **Smart Contract Layer (`SentinelVault.sol`):** The vault cryptographically verifies that the requested payment perfectly adheres to the on-chain policy before releasing funds.
+
+---
+
+## 🎮 The "Rogue Agent" Demo
+
+We built a specific simulator to prove the infrastructure works deterministically under stress. Try it out!
+
 ```bash
-# 1) Clone
-
-git clone https://github.com/Code4livingg/sentinelpay.git
-cd sentinelpay
-
-# 2) Backend
-pip install -r backend/requirements.txt
+# Terminal 1: Start backend
 cd backend
-# cp .env.example .env and set CELO_RPC / PRIVATE_KEY / AGENT_VAULT_ADDRESS / USDC_ADDRESS
+pip install -r requirements.txt
+cp .env.example .env # Configure Celo RPC and Vault Address
 uvicorn main:app --host 0.0.0.0 --port 8000
 
-# 3) Frontend
-cd ../frontend
-npm install
-npm run dev
-
-# 4) Run demo agent
-BACKEND_URL=http://127.0.0.1:8000 python3 ../backend/scripts/run_execute_demo.py
+# Terminal 2: Unleash the Rogue Agent
+python3 backend/scripts/rogue_agent_demo.py
 ```
+Watch as the AI attempts to siphon funds to an unauthorized address or overspend its daily limit, only to be seamlessly rejected by the Celo smart contract policy engine returning a highly descriptive revert reason.
 
-## Integration & Verification
+---
 
-To verify your environment is correctly configured:
-- Demo guide: [DEMO_GUIDE.md](docs/DEMO_GUIDE.md)
-- Automated verification:
-  - dry run: `python3 backend/scripts/smoke_test.py --base-url http://127.0.0.1:8000`
-  - full (real tx): `python3 backend/scripts/smoke_test.py --execute-demo --base-url http://127.0.0.1:8000`
+## 💻 Quickstart (Web Demo)
 
-## SDK (Python)
+If you'd rather see the full stack in action visually:
+
+1. **Visit [sentinelpay.vercel.app](https://sentinelpay.vercel.app)**
+2. Connect your wallet (Celo Sepolia).
+3. Navigate to the **Demo** tab.
+4. Hit **Run Demo**. 
+
+You'll watch the backend synthesize live Web2 Data (Weather/Market APIs) immediately after the smart contract settles the sub-second USDC payment on the Celo network.
+
+---
+
+## 📦 Developer SDK
+
+Integrating into your own agent is a 3-line process:
+
 ```python
-from sentinelpay import SentinelPayClient
+from sentinelpay import AsyncSentinelPayClient
 
-client = SentinelPayClient("https://your-backend.onrender.com", agent_id="weather_agent")
-print(client.get_vault_balance())
-tx = client.execute_payment(0.50, "0xRecipient")
-executions = client.get_executions()
-print(tx, executions)
+async def run_agent():
+    # Instantiate the async, non-blocking client
+    client = AsyncSentinelPayClient("https://your-backend.example", agent_id="trade_bot")
+    
+    # Attempt an on-chain execution
+    try:
+        tx = await client.execute_payment(amount=1.50, recipient="0xWhitelisted...")
+        print(f"Payment successful: {tx['tx_hash']}")
+    except Exception as e:
+        print(f"Policy violation prevented payment: {e}")
 ```
 
-## Contract (Celo Sepolia)
-- Deploy contracts via `contracts/scripts/deploy.js`
-- Set `AGENT_VAULT_ADDRESS` in backend/frontend env after deployment
-- Optional explorer base URL: `https://sepolia.celoscan.io`
+---
 
-## Debug Endpoints
-- `GET /debug/db-status` — DB backend, row count, schema
-- `GET /vault-balance` — USDC balance for the agent vault
-- `POST /execute-payment` — execute policy-gated payment with `{ agent_id, recipient, amount_usdc }`
-- `GET /payment-jobs` — queued/retried/dead-letter payment jobs
+## 🔮 Roadmap
 
-## Production Hardening Flags
-Set these in `backend/.env` for production deployments (optional toggles; defaults are relaxed for demo):
+* **Phase 1 (MVP) ✅:** Core infrastructure, Python Async SDK, On-chain policy enforcement, Dashboard observability.
+* **Phase 2:** Multi-agent UX (multiple `agent_ids` bound to a single vault), robust ERC-8004 identity integration.
+* **Phase 3:** Open developer platform, Celo Mainnet deployment, "Good Actor" automated agent reputation scoring.
+* **Phase 4:** DAO-controlled governance for agent global spending limits.
 
-- `REQUIRE_OPERATOR_AUTH=true`
-- `OPERATOR_API_KEYS=<comma-separated-long-random-keys>`
-- `REQUIRE_IDEMPOTENCY_KEY=true`
-- `REQUIRE_AGENT_SIGNATURE=true`
-- `AGENT_SHARED_SECRET=<long-random-secret-shared-with-agent-runtime>`
-- `PAYMENT_WORKER_ENABLED=true`
-- `PAYMENT_JOB_MAX_ATTEMPTS=3`
-- `PAYMENT_JOB_RETRY_BASE_SECONDS=2`
-
-When enabled:
-- Mutating endpoints (`/execute-payment`, `/execute-demo`, `/agent-execute`, `/transactions`) require `X-Operator-Key`.
-- Mutating endpoints require `Idempotency-Key` and safely replay identical requests instead of double-executing.
-- Agent-triggered endpoints (`/execute-payment`, `/execute-demo`, `/agent-execute`) require HMAC headers:
-  `X-Agent-Id`, `X-Agent-Timestamp`, `X-Agent-Signature`.
-
-## Queue Worker
-- Payments are executed through a DB-backed job queue (`payment_jobs`) with retry and dead-letter handling.
-- Inspect queue state via:
-  - `GET /payment-jobs`
-  - `GET /payment-jobs/{job_key}`
-
-## Competitive Differentiation
-| Capability | SentinelPay (MVP) | Gnosis Safe Limits | ERC-4337 Paymasters |
-|---|---|---|---|
-| **ERC-8004-aligned (Roadmap)** | ⚠️ | ❌ | ❌ |
-| Designed for AI agents (not humans) | ✅ | ❌ | ⚠️ |
-| On-chain policy enforcement | ✅ | ⚠️ | ⚠️ |
-| Backend-agnostic execution | ⚠️ | ❌ | ⚠️ |
-| Execution logging & audit trail | ✅ | ⚠️ | ⚠️ |
-| Machine-to-machine native | ✅ | ❌ | ⚠️ |
-| Celo-native | ✅ | ⚠️ | ⚠️ |
-
-_Note: MVP execution is initiated by the operator wallet in the backend; backend-agnostic execution is a roadmap target._
-
-## Roadmap
-- Wave 1 (Current) — Core infrastructure: SentinelVault contract, policy enforcement, execution logging, observability dashboard
-- Wave 2 (Next) — SDK polish, multi-agent UX (multiple agent_ids per vault), automated event polling replacing manual trigger
-- Wave 3 — Celo mainnet deployment, first external developer integrations, agent marketplace prototype
-- Wave 4 — Cross-chain agent execution support, DAO-controlled policy governance, production SLA
+## 📄 License
+MIT License. Built with ❤️ for the Celo Ecosystem.
