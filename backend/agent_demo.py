@@ -72,6 +72,7 @@ async def demo_market_agent():
     print(f"  - Market: {result.get('market', 'N/A')}")
     print(f"  - BTC Price: ${result.get('btc_price', 'N/A')}")
     print(f"  - ETH Price: ${result.get('eth_price', 'N/A')}")
+    print(f"  - CELO Price: ${result.get('celo_price', 'N/A')}")
     print(f"  - Trend: {result.get('trend', 'N/A')}")
     print(f"  - Payment Status: {'Paid' if result.get('paid') else 'Unpaid'}")
     

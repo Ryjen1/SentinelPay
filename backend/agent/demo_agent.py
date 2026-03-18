@@ -54,7 +54,7 @@ class DemoAgent:
             resp.raise_for_status()
             return resp.json()
 
-    def run(self, task: str) -> Dict[str, Any]:
+    def run(self, task: str, agent_id: str | None = None) -> Dict[str, Any]:
         if not os.getenv("OPENAI_API_KEY"):
             raise RuntimeError("OPENAI_API_KEY is required to run the demo agent")
 
@@ -111,7 +111,9 @@ class DemoAgent:
                 amount = float(args.get("amount", 0))
                 recipient = str(args.get("recipient", "")).strip()
                 reason = str(args.get("reason", "")).strip()
-                agent_id = str(args.get("agent_id", os.getenv("DEFAULT_AGENT_ID", "weather_agent"))).strip()
+                agent_id = str(
+                    args.get("agent_id", agent_id or os.getenv("DEFAULT_AGENT_ID", "weather_agent"))
+                ).strip()
 
                 if amount <= 0:
                     raise RuntimeError("Model provided invalid amount for execute_payment")

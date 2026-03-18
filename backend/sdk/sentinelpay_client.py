@@ -9,6 +9,7 @@ import asyncio
 import time
 from pathlib import Path
 from web3 import Web3
+import re
 from eth_account import Account
 import httpx
 from dotenv import load_dotenv
@@ -16,8 +17,8 @@ from dotenv import load_dotenv
 # Load environment variables from backend/.env first, then root .env as fallback.
 backend_env_path = Path(__file__).resolve().parent.parent / ".env"
 root_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
-load_dotenv(dotenv_path=backend_env_path)
-load_dotenv(dotenv_path=root_env_path)
+load_dotenv(dotenv_path=backend_env_path, override=True)
+load_dotenv(dotenv_path=root_env_path, override=True)
 
 # Environment variables
 ALCHEMY_RPC = os.getenv("CELO_RPC") or os.getenv("ALCHEMY_RPC")
@@ -35,6 +36,15 @@ MOCK_MODE = os.getenv("MOCK_PAYMENT", "false").lower() == "true"
 w3 = None
 account = None
 agent_vault = None
+
+_VAULT_ERROR_SELECTOR_MAP = None
+_VAULT_ERROR_HINTS = {
+    "AgentNotActive": "Agent policy is inactive. Activate policy before execution.",
+    "RecipientNotWhitelisted": "Recipient is not whitelisted in policy.",
+    "ExceedsPerTxLimit": "Amount exceeds per-transaction policy limit.",
+    "ExceedsDailyCap": "Amount exceeds daily cap for this agent.",
+    "InsufficientBalance": "Insufficient vault balance for this agent.",
+}
 
 def get_w3():
     global w3
@@ -88,6 +98,67 @@ def get_vault():
             return None
     return agent_vault
 
+
+def _build_vault_error_selector_map() -> dict[str, str]:
+    global _VAULT_ERROR_SELECTOR_MAP
+    if _VAULT_ERROR_SELECTOR_MAP is not None:
+        return _VAULT_ERROR_SELECTOR_MAP
+    _vault = get_vault()
+    if not _vault:
+        _VAULT_ERROR_SELECTOR_MAP = {}
+        return _VAULT_ERROR_SELECTOR_MAP
+    selector_map: dict[str, str] = {}
+    for item in getattr(_vault, "abi", []) or []:
+        if item.get("type") != "error":
+            continue
+        name = item.get("name")
+        if not name:
+            continue
+        inputs = item.get("inputs", [])
+        input_types: list[str] = []
+        for arg in inputs:
+            arg_type = arg.get("type") if isinstance(arg, dict) else None
+            if not arg_type:
+                input_types = []
+                break
+            input_types.append(arg_type)
+        signature = f"{name}({','.join(input_types)})"
+        selector_hex = Web3.keccak(text=signature)[:4].hex()
+        if selector_hex.startswith("0x"):
+            selector_hex = selector_hex[2:]
+        selector = "0x" + selector_hex
+        selector_map[selector.lower()] = name
+    _VAULT_ERROR_SELECTOR_MAP = selector_map
+    return selector_map
+
+
+def _extract_revert_selector(exc: Exception) -> str | None:
+    values = [str(exc)]
+    for arg in getattr(exc, "args", ()) or ():
+        if isinstance(arg, str):
+            values.append(arg)
+    for value in values:
+        text = value.strip()
+        if text.startswith("0x") and len(text) >= 10:
+            return text[:10].lower()
+        match = re.search(r"0x[0-9a-fA-F]{8}", text)
+        if match:
+            return match.group(0).lower()
+    return None
+
+
+def _format_execute_payment_revert(exc: Exception) -> str:
+    selector = _extract_revert_selector(exc)
+    if selector:
+        selector_map = _build_vault_error_selector_map()
+        error_name = selector_map.get(selector)
+        if error_name:
+            return _VAULT_ERROR_HINTS.get(error_name, f"Contract reverted with {error_name}.")
+    text = str(exc).strip()
+    if text:
+        return f"Contract reverted: {text}"
+    return "Contract reverted"
+
 # Initial check for logging
 if MOCK_MODE:
     print("[✓] Running in MOCK MODE")
@@ -96,7 +167,7 @@ else:
         print("[!] Warning: Missing required environment variables for on-chain payments")
 
 
-async def call_paid_endpoint(agent_id: str, endpoint: str) -> dict:
+async def call_paid_endpoint(agent_id: str, endpoint: str, *, extra_headers: dict | None = None) -> dict:
     """
     Call a paid API endpoint with automatic on-chain payment execution
     """
@@ -104,9 +175,10 @@ async def call_paid_endpoint(agent_id: str, endpoint: str) -> dict:
     _account = get_account()
     _vault = get_vault()
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        base_headers = extra_headers or {}
         print("[1] Calling endpoint")
-        response = await client.get(endpoint)
+        response = await client.get(endpoint, headers=base_headers)
 
         if response.status_code != 402:
             return response.json()
@@ -131,6 +203,16 @@ async def call_paid_endpoint(agent_id: str, endpoint: str) -> dict:
             agent_id_bytes = Web3.keccak(text=agent_id)
             amount_units = int(round(amount * 10**6))
             recipient_address = Web3.to_checksum_address(recipient)
+
+            # Preflight to surface deterministic policy reverts before spending gas.
+            try:
+                _vault.functions.executePayment(
+                    agent_id_bytes,
+                    recipient_address,
+                    amount_units,
+                ).call({"from": _account.address})
+            except Exception as e:
+                raise Exception(_format_execute_payment_revert(e))
 
             nonce = _w3.eth.get_transaction_count(_account.address)
 
@@ -158,14 +240,20 @@ async def call_paid_endpoint(agent_id: str, endpoint: str) -> dict:
                 raise Exception(f"Transaction timeout or RPC error: {str(e)}")
 
             if receipt["status"] == 0:
-                raise Exception(
-                    "On-chain payment transaction reverted - policy check failed or insufficient balance"
-                )
+                try:
+                    _vault.functions.executePayment(
+                        agent_id_bytes,
+                        recipient_address,
+                        amount_units,
+                    ).call({"from": _account.address})
+                except Exception as e:
+                    raise Exception(_format_execute_payment_revert(e))
+                raise Exception("On-chain payment transaction reverted - policy check failed or insufficient balance")
 
             print(f"[4] Transaction confirmed: {tx_hash_hex}")
 
         print("[5] Retrying endpoint")
-        headers = {"X-Payment-Proof": tx_hash_hex}
+        headers = {"X-Payment-Proof": tx_hash_hex, **base_headers}
         response = await client.get(endpoint, headers=headers)
 
         if response.status_code >= 400:

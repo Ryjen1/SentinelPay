@@ -5,5 +5,5 @@ setup(
     name="sentinelpay",
     version="0.1.0",
     packages=find_packages(),
-    install_requires=["requests>=2.0.0"],
+    install_requires=["requests>=2.0.0", "httpx>=0.24.0"],
 )

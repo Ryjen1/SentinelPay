@@ -9,12 +9,16 @@ import hmac
 import sqlite3
 import asyncio
 import json
+from urllib.parse import urlencode
 import re
 from datetime import datetime
 from dotenv import load_dotenv
 from urllib.parse import urlparse
 from web3 import Web3
+from eth_account import Account
+from eth_account.messages import encode_defunct
 import traceback
+import httpx
 
 # Agent demo integration
 from agent.demo_agent import DemoAgent
@@ -24,6 +28,7 @@ from sdk.sentinelpay_client import (
     get_vault,
     get_w3,
     get_account,
+    call_paid_endpoint,
     MOCK_MODE,
     AGENT_VAULT_ADDRESS,
     ALCHEMY_RPC,
@@ -33,8 +38,8 @@ from sdk.sentinelpay_client import (
     NETWORK_NAME,
 )
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=True)
+load_dotenv(override=True)
 print(f"[startup] VAULT_ADDRESS={AGENT_VAULT_ADDRESS}")
 print(f"[startup] RPC configured: {bool(ALCHEMY_RPC)}")
 print(f"[startup] PRIVATE_KEY configured: {bool(PRIVATE_KEY)}")
@@ -43,6 +48,98 @@ print(f"[startup] PRIVATE_KEY configured: {bool(PRIVATE_KEY)}")
 w3 = get_w3()
 agent_vault = get_vault()
 account = get_account()
+
+POLICY_REGISTRY_ABI = [
+    {
+        "name": "owner",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}],
+    },
+    {
+        "name": "getPolicy",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [{"name": "agentId", "type": "bytes32"}],
+        "outputs": [
+            {
+                "components": [
+                    {"name": "maxPerTx", "type": "uint256"},
+                    {"name": "dailyCap", "type": "uint256"},
+                    {"name": "whitelist", "type": "address[]"},
+                    {"name": "isActive", "type": "bool"},
+                    {"name": "registeredAt", "type": "uint256"},
+                ],
+                "type": "tuple",
+            }
+        ],
+    },
+    {
+        "name": "registerAgent",
+        "type": "function",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "agentId", "type": "bytes32"},
+            {"name": "maxPerTx", "type": "uint256"},
+            {"name": "dailyCap", "type": "uint256"},
+            {"name": "whitelist", "type": "address[]"},
+        ],
+        "outputs": [],
+    },
+    {
+        "name": "unpauseAgent",
+        "type": "function",
+        "stateMutability": "nonpayable",
+        "inputs": [{"name": "agentId", "type": "bytes32"}],
+        "outputs": [],
+    },
+]
+
+policy_registry = None
+
+
+def _discover_policy_registry_address() -> Optional[str]:
+    _vault = get_vault()
+    if not _vault:
+        return None
+    try:
+        addr = _vault.functions.policyRegistry().call()
+    except Exception as exc:
+        print(f"[startup] Failed to read policyRegistry from vault: {exc}")
+        return None
+    if isinstance(addr, str) and Web3.is_address(addr) and int(addr, 16) != 0:
+        return Web3.to_checksum_address(addr)
+    return None
+
+
+def get_policy_registry():
+    global policy_registry
+    global POLICY_REGISTRY_ADDRESS
+    if policy_registry is None and w3:
+        address = POLICY_REGISTRY_ADDRESS
+        if not address:
+            discovered = _discover_policy_registry_address()
+            if discovered:
+                address = discovered
+                POLICY_REGISTRY_ADDRESS = discovered
+                print(f"[startup] PolicyRegistry discovered from vault: {POLICY_REGISTRY_ADDRESS}")
+        if address:
+            try:
+                policy_registry = w3.eth.contract(
+                    address=Web3.to_checksum_address(address),
+                    abi=POLICY_REGISTRY_ABI,
+                )
+            except Exception as exc:
+                print(f"[startup] Failed to init PolicyRegistry: {exc}")
+                policy_registry = None
+    return policy_registry
+
+
+def reset_policy_registry():
+    global policy_registry
+    policy_registry = None
+    return get_policy_registry()
 
 
 def _parse_bool_env(name: str, default: bool) -> bool:
@@ -72,6 +169,16 @@ def _parse_int_env(name: str, default: int) -> int:
     return value
 
 
+def _parse_float_env(name: str) -> Optional[float]:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw.strip())
+    except Exception as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+
+
 def _sqlite_path_from_url(database_url: str) -> str:
     if database_url == "sqlite:///:memory:":
         return ":memory:"
@@ -95,6 +202,10 @@ def _default_payment_worker_enabled() -> bool:
 
 DEFAULT_AGENT_ID = os.getenv("DEFAULT_AGENT_ID", "weather_agent")
 DEFAULT_RECIPIENT = os.getenv("DEFAULT_RECIPIENT", "0x61254AEcF84eEdb890f07dD29f7F3cd3b8Eb2CBe")
+POLICY_REGISTRY_ADDRESS = os.getenv("POLICY_REGISTRY_ADDRESS", "")
+print(f"[startup] POLICY_REGISTRY_ADDRESS={POLICY_REGISTRY_ADDRESS}")
+DEFAULT_MAX_PER_TX_USDC = float(os.getenv("DEFAULT_MAX_PER_TX_USDC", "1.0"))
+DEFAULT_DAILY_CAP_USDC = float(os.getenv("DEFAULT_DAILY_CAP_USDC", "5.0"))
 WEATHER_PRICE_USDC = float(os.getenv("WEATHER_PRICE_USDC", "0.001"))
 DATA_FEED_PRICE_USDC = float(os.getenv("DATA_FEED_PRICE_USDC", "0.002"))
 DEMO_EXECUTION_AMOUNT_USDC = float(os.getenv("DEMO_EXECUTION_AMOUNT_USDC", "0.50"))
@@ -106,6 +217,15 @@ NETWORK_RATIONALE = os.getenv(
     "Low fees and fast confirmations make agentic micro-payments on Celo practical.",
 )
 EXPLORER_TX_BASE_URL = os.getenv("EXPLORER_TX_BASE_URL", "https://sepolia.celoscan.io/tx")
+LIVE_MARKET_DATA = _parse_bool_env("LIVE_MARKET_DATA", False)
+MARKET_DATA_TIMEOUT_SECONDS = float(os.getenv("MARKET_DATA_TIMEOUT_SECONDS", "6"))
+LIVE_WEATHER_DATA = _parse_bool_env("LIVE_WEATHER_DATA", False)
+WEATHER_CITY = os.getenv("WEATHER_CITY", "Bangalore")
+WEATHER_LATITUDE = _parse_float_env("WEATHER_LATITUDE")
+WEATHER_LONGITUDE = _parse_float_env("WEATHER_LONGITUDE")
+WEATHER_DATA_TIMEOUT_SECONDS = float(os.getenv("WEATHER_DATA_TIMEOUT_SECONDS", "6"))
+REQUIRE_WALLET_SIGNATURE = _parse_bool_env("REQUIRE_WALLET_SIGNATURE", False)
+WALLET_SIGNATURE_MAX_SKEW_SECONDS = _parse_int_env("WALLET_SIGNATURE_MAX_SKEW_SECONDS", 300)
 REQUIRE_OPERATOR_AUTH = _parse_bool_env("REQUIRE_OPERATOR_AUTH", False)
 REQUIRE_IDEMPOTENCY_KEY = _parse_bool_env("REQUIRE_IDEMPOTENCY_KEY", False)
 OPERATOR_API_KEYS = _normalized_operator_keys(os.getenv("OPERATOR_API_KEYS", ""))
@@ -117,6 +237,12 @@ PAYMENT_JOB_MAX_ATTEMPTS = _parse_int_env("PAYMENT_JOB_MAX_ATTEMPTS", 3)
 PAYMENT_JOB_RETRY_BASE_SECONDS = _parse_int_env("PAYMENT_JOB_RETRY_BASE_SECONDS", 2)
 PAYMENT_JOB_WAIT_TIMEOUT_SECONDS = _parse_int_env("PAYMENT_JOB_WAIT_TIMEOUT_SECONDS", 120)
 PAYMENT_WORKER_POLL_MS = _parse_int_env("PAYMENT_WORKER_POLL_MS", 400)
+
+# Latest paid market/weather snapshots (in-memory)
+LAST_MARKET_SNAPSHOT_BY_AGENT: dict[str, dict[str, Any]] = {}
+LAST_MARKET_CAPTURED_AT_BY_AGENT: dict[str, float] = {}
+LAST_WEATHER_SNAPSHOT_BY_AGENT: dict[str, dict[str, Any]] = {}
+LAST_WEATHER_CAPTURED_AT_BY_AGENT: dict[str, float] = {}
 
 app = FastAPI(title="SentinelPay API")
 
@@ -333,37 +459,64 @@ class Database:
         finally:
             conn.close()
 
-    async def fetch_transactions(self, limit: int = 50):
+    async def fetch_transactions(self, limit: int = 50, agent_id: Optional[str] = None):
         if self.backend == "sqlite":
-            return await asyncio.to_thread(self._sqlite_fetch, limit)
+            return await asyncio.to_thread(self._sqlite_fetch, limit, agent_id)
 
         async with self.pg_pool.acquire() as conn:
-            rows = await conn.fetch(
+            if agent_id:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, agent_id, recipient, amount_usdc, tx_hash, status, block_reason,
+                           timestamp, created_at, block_number, gas_used
+                    FROM transactions
+                    WHERE agent_id = $1
+                    ORDER BY timestamp DESC
+                    LIMIT $2
+                    """,
+                    agent_id,
+                    limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, agent_id, recipient, amount_usdc, tx_hash, status, block_reason,
+                           timestamp, created_at, block_number, gas_used
+                    FROM transactions
+                    ORDER BY timestamp DESC
+                    LIMIT $1
+                    """,
+                    limit,
+                )
+            return [dict(row) for row in rows]
+
+    def _sqlite_fetch(self, limit: int, agent_id: Optional[str]):
+        conn = sqlite3.connect(self.sqlite_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        if agent_id:
+            cur.execute(
+                """
+                SELECT id, agent_id, recipient, amount_usdc, tx_hash, status, block_reason,
+                       timestamp, created_at, block_number, gas_used
+                FROM transactions
+                WHERE agent_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (agent_id, limit),
+            )
+        else:
+            cur.execute(
                 """
                 SELECT id, agent_id, recipient, amount_usdc, tx_hash, status, block_reason,
                        timestamp, created_at, block_number, gas_used
                 FROM transactions
                 ORDER BY timestamp DESC
-                LIMIT $1
+                LIMIT ?
                 """,
-                limit,
+                (limit,),
             )
-            return [dict(row) for row in rows]
-
-    def _sqlite_fetch(self, limit: int):
-        conn = sqlite3.connect(self.sqlite_path)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, agent_id, recipient, amount_usdc, tx_hash, status, block_reason,
-                   timestamp, created_at, block_number, gas_used
-            FROM transactions
-            ORDER BY timestamp DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
         rows = [dict(r) for r in cur.fetchall()]
         conn.close()
         return rows
@@ -934,6 +1087,16 @@ def _agent_signature_for_message(message: str) -> str:
     return hmac.new(AGENT_SHARED_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
 
 
+def _wallet_signature_message(*, address: str, timestamp: str, agent_id: str, path: str) -> str:
+    return (
+        "SentinelPay Demo Authorization\n"
+        f"Address: {address}\n"
+        f"AgentId: {agent_id}\n"
+        f"Timestamp: {timestamp}\n"
+        f"Path: {path}"
+    )
+
+
 def _validate_runtime_config() -> None:
     if not DEFAULT_AGENT_ID.strip():
         raise RuntimeError("DEFAULT_AGENT_ID cannot be empty")
@@ -949,6 +1112,8 @@ def _validate_runtime_config() -> None:
         raise RuntimeError("REQUIRE_AGENT_SIGNATURE=true but AGENT_SHARED_SECRET is empty")
     if AGENT_SIGNATURE_MAX_SKEW_SECONDS <= 0:
         raise RuntimeError("AGENT_SIGNATURE_MAX_SKEW_SECONDS must be greater than 0")
+    if REQUIRE_WALLET_SIGNATURE and WALLET_SIGNATURE_MAX_SKEW_SECONDS <= 0:
+        raise RuntimeError("WALLET_SIGNATURE_MAX_SKEW_SECONDS must be greater than 0")
     if PAYMENT_JOB_MAX_ATTEMPTS <= 0:
         raise RuntimeError("PAYMENT_JOB_MAX_ATTEMPTS must be greater than 0")
     if PAYMENT_JOB_RETRY_BASE_SECONDS <= 0:
@@ -1000,6 +1165,37 @@ async def require_agent_signature(
     expected = _agent_signature_for_message(message)
     if not hmac.compare_digest(expected, x_agent_signature):
         raise HTTPException(status_code=401, detail={"error": "Invalid agent signature"})
+
+
+async def require_wallet_signature(
+    request: Request,
+    x_wallet_address: Optional[str] = Header(None, alias="X-Wallet-Address"),
+    x_wallet_signature: Optional[str] = Header(None, alias="X-Wallet-Signature"),
+    x_wallet_timestamp: Optional[str] = Header(None, alias="X-Wallet-Timestamp"),
+    x_wallet_agent_id: Optional[str] = Header(None, alias="X-Wallet-Agent-Id"),
+) -> None:
+    if not REQUIRE_WALLET_SIGNATURE:
+        return
+    if not x_wallet_address or not x_wallet_signature or not x_wallet_timestamp or not x_wallet_agent_id:
+        raise HTTPException(status_code=401, detail={"error": "Missing wallet signature headers"})
+    if not Web3.is_address(x_wallet_address):
+        raise HTTPException(status_code=401, detail={"error": "Invalid wallet address"})
+    try:
+        ts = int(x_wallet_timestamp)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail={"error": "Invalid wallet signature timestamp"}) from exc
+    if abs(int(time.time()) - ts) > WALLET_SIGNATURE_MAX_SKEW_SECONDS:
+        raise HTTPException(status_code=401, detail={"error": "Wallet signature timestamp is outside allowed skew"})
+
+    message = _wallet_signature_message(
+        address=Web3.to_checksum_address(x_wallet_address),
+        timestamp=x_wallet_timestamp,
+        agent_id=x_wallet_agent_id,
+        path=request.url.path,
+    )
+    recovered = Account.recover_message(encode_defunct(text=message), signature=x_wallet_signature)
+    if recovered.lower() != x_wallet_address.lower():
+        raise HTTPException(status_code=401, detail={"error": "Invalid wallet signature"})
 
 
 def _idempotency_payload_hash(payload: dict) -> str:
@@ -1232,6 +1428,43 @@ async def _send_execute_payment_tx(
     raise HTTPException(status_code=500, detail={"error": "Unable to obtain a valid nonce for transaction"})
 
 
+async def _send_owner_tx(build_tx_fn) -> tuple[str, dict]:
+    if not w3 or not account:
+        raise HTTPException(status_code=500, detail={"error": "Blockchain client is not configured"})
+
+    global NONCE_CACHE
+    for attempt in range(2):
+        async with NONCE_LOCK:
+            pending_nonce = await asyncio.to_thread(w3.eth.get_transaction_count, account.address, "pending")
+            if NONCE_CACHE is None or NONCE_CACHE < pending_nonce:
+                NONCE_CACHE = pending_nonce
+            nonce = NONCE_CACHE
+
+            gas_price = await asyncio.to_thread(lambda: w3.eth.gas_price)
+            chain_id = await asyncio.to_thread(lambda: w3.eth.chain_id)
+            tx = build_tx_fn(nonce, gas_price, chain_id)
+            signed = account.sign_transaction(tx)
+            try:
+                tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.rawTransaction)
+                NONCE_CACHE = nonce + 1
+            except Exception as exc:
+                if attempt == 0 and _is_nonce_issue(exc):
+                    NONCE_CACHE = None
+                    continue
+                raise HTTPException(status_code=500, detail={"error": f"Failed to submit transaction: {str(exc)}"})
+
+        try:
+            receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 180)
+            return tx_hash.hex(), receipt
+        except Exception as exc:
+            if attempt == 0 and _is_nonce_issue(exc):
+                NONCE_CACHE = None
+                continue
+            raise HTTPException(status_code=500, detail={"error": f"Transaction confirmation failed: {str(exc)}"})
+
+    raise HTTPException(status_code=500, detail={"error": "Unable to obtain a valid nonce for transaction"})
+
+
 async def _payment_worker_loop() -> None:
     print("[payment-worker] started")
     while PAYMENT_WORKER_STOP_EVENT and not PAYMENT_WORKER_STOP_EVENT.is_set():
@@ -1325,6 +1558,7 @@ class Transaction(BaseModel):
 
 class AgentExecuteRequest(BaseModel):
     task: str
+    agent_id: Optional[str] = None
 
 
 class ExecutePaymentRequest(BaseModel):
@@ -1339,6 +1573,89 @@ class ExecuteDemoRequest(BaseModel):
     recipient: str = DEFAULT_RECIPIENT
     amount_usdc: float = DEMO_EXECUTION_AMOUNT_USDC
     reason: Optional[str] = None
+    actions: Optional[list[str]] = None
+    weather_city: Optional[str] = None
+    weather_lat: Optional[float] = None
+    weather_lon: Optional[float] = None
+
+
+def _resolve_agent_id(agent_id: Optional[str], header_agent_id: Optional[str]) -> str:
+    resolved = (agent_id or header_agent_id or DEFAULT_AGENT_ID).strip()
+    if not resolved:
+        raise HTTPException(status_code=400, detail={"error": "agent_id is required"})
+    return resolved
+
+
+async def _ensure_agent_policy(agent_id: str) -> None:
+    registry = get_policy_registry()
+    if not registry:
+        raise HTTPException(status_code=500, detail={"error": "PolicyRegistry is not configured"})
+
+    agent_id_bytes = Web3.keccak(text=agent_id)
+    try:
+        policy = await asyncio.to_thread(registry.functions.getPolicy(agent_id_bytes).call)
+    except Exception as exc:
+        # Retry once using the policy registry address discovered from the vault.
+        discovered = _discover_policy_registry_address()
+        if discovered and discovered.lower() != POLICY_REGISTRY_ADDRESS.lower():
+            print(
+                "[policy] getPolicy failed. Switching PolicyRegistry from "
+                f"{POLICY_REGISTRY_ADDRESS} to {discovered}."
+            )
+            globals()["POLICY_REGISTRY_ADDRESS"] = discovered
+            registry = reset_policy_registry()
+            if registry:
+                try:
+                    policy = await asyncio.to_thread(registry.functions.getPolicy(agent_id_bytes).call)
+                except Exception as exc2:
+                    raise HTTPException(status_code=500, detail={"error": f"Failed to fetch policy: {str(exc2)}"})
+            else:
+                raise HTTPException(status_code=500, detail={"error": "PolicyRegistry is not configured"})
+        else:
+            raise HTTPException(status_code=500, detail={"error": f"Failed to fetch policy: {str(exc)}"})
+
+    # policy tuple: (maxPerTx, dailyCap, whitelist, isActive, registeredAt)
+    registered_at = int(policy[4] or 0)
+    is_active = bool(policy[3])
+
+    if registered_at > 0:
+        if not is_active:
+            def _build_unpause_tx(nonce, gas_price, chain_id):
+                return registry.functions.unpauseAgent(agent_id_bytes).build_transaction(
+                    {
+                        "from": account.address,
+                        "nonce": nonce,
+                        "gas": 200000,
+                        "gasPrice": gas_price,
+                        "chainId": chain_id,
+                    }
+                )
+            await _send_owner_tx(_build_unpause_tx)
+        return
+
+    if not DEFAULT_RECIPIENT or DEFAULT_RECIPIENT == "0x0000000000000000000000000000000000000000":
+        raise HTTPException(status_code=500, detail={"error": "DEFAULT_RECIPIENT is not configured"})
+
+    max_units = int(round(DEFAULT_MAX_PER_TX_USDC * 10**6))
+    daily_units = int(round(DEFAULT_DAILY_CAP_USDC * 10**6))
+
+    def _build_register_tx(nonce, gas_price, chain_id):
+        return registry.functions.registerAgent(
+            agent_id_bytes,
+            max_units,
+            daily_units,
+            [Web3.to_checksum_address(DEFAULT_RECIPIENT)],
+        ).build_transaction(
+            {
+                "from": account.address,
+                "nonce": nonce,
+                "gas": 300000,
+                "gasPrice": gas_price,
+                "chainId": chain_id,
+            }
+        )
+
+    await _send_owner_tx(_build_register_tx)
 
 
 def _validate_payment_proof(
@@ -1473,6 +1790,166 @@ def _payment_required_detail(*, amount: float, recipient: str, description: str)
 
 def _tx_url(tx_hash: str) -> str:
     return f"{EXPLORER_TX_BASE_URL.rstrip('/')}/{tx_hash}"
+
+
+def _demo_base_url() -> str:
+    return (os.getenv("BACKEND_URL", "http://127.0.0.1:8000") or "http://127.0.0.1:8000").rstrip("/")
+
+
+_WEATHER_CODE_MAP = {
+    0: "Clear",
+    1: "Mainly Clear",
+    2: "Partly Cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Depositing Rime Fog",
+    51: "Light Drizzle",
+    53: "Moderate Drizzle",
+    55: "Dense Drizzle",
+    56: "Light Freezing Drizzle",
+    57: "Dense Freezing Drizzle",
+    61: "Slight Rain",
+    63: "Moderate Rain",
+    65: "Heavy Rain",
+    66: "Light Freezing Rain",
+    67: "Heavy Freezing Rain",
+    71: "Slight Snow",
+    73: "Moderate Snow",
+    75: "Heavy Snow",
+    77: "Snow Grains",
+    80: "Slight Rain Showers",
+    81: "Moderate Rain Showers",
+    82: "Violent Rain Showers",
+    85: "Slight Snow Showers",
+    86: "Heavy Snow Showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with Hail",
+    99: "Thunderstorm with Heavy Hail",
+}
+
+
+def _weather_condition_from_code(code: Any) -> str:
+    try:
+        code_int = int(code)
+    except Exception:
+        return "Unknown"
+    return _WEATHER_CODE_MAP.get(code_int, "Unknown")
+
+
+async def _fetch_live_weather_data(*, city: Optional[str], lat: Optional[float], lon: Optional[float]) -> dict[str, Any]:
+    resolved_city = (city or WEATHER_CITY or "Bangalore").strip()
+    latitude = lat if lat is not None else WEATHER_LATITUDE
+    longitude = lon if lon is not None else WEATHER_LONGITUDE
+
+    async with httpx.AsyncClient(timeout=WEATHER_DATA_TIMEOUT_SECONDS) as client:
+        if latitude is None or longitude is None:
+            geo_response = await client.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={
+                    "name": resolved_city,
+                    "count": 1,
+                    "language": "en",
+                    "format": "json",
+                },
+                headers={"accept": "application/json"},
+            )
+            geo_response.raise_for_status()
+            geo_payload = geo_response.json()
+            results = geo_payload.get("results") if isinstance(geo_payload, dict) else None
+            if not results:
+                raise RuntimeError(f"No geocoding results for '{resolved_city}'")
+            top = results[0]
+            latitude = top.get("latitude")
+            longitude = top.get("longitude")
+            name = top.get("name") or resolved_city
+            country = top.get("country_code") or top.get("country")
+            resolved_city = f"{name}, {country}" if country else name
+
+        if latitude is None or longitude is None:
+            raise RuntimeError("Missing latitude/longitude for weather lookup")
+
+        # If we used device coordinates but no explicit city label, show the coords instead of a stale default city.
+        if not city and lat is not None and lon is not None:
+            resolved_city = f"Lat {latitude:.4f}, Lon {longitude:.4f}"
+
+        weather_response = await client.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
+                "current": "temperature_2m,relative_humidity_2m,weather_code",
+                "timezone": "auto",
+            },
+            headers={"accept": "application/json"},
+        )
+        weather_response.raise_for_status()
+        weather_payload = weather_response.json()
+
+    current = weather_payload.get("current") if isinstance(weather_payload, dict) else None
+    if not current:
+        raise RuntimeError("Live weather data missing current payload")
+
+    temperature = current.get("temperature_2m")
+    humidity = current.get("relative_humidity_2m")
+    weather_code = current.get("weather_code")
+
+    if temperature is None or humidity is None:
+        raise RuntimeError("Live weather data missing temperature/humidity values")
+
+    return {
+        "city": resolved_city,
+        "temperature": f"{temperature}C",
+        "condition": _weather_condition_from_code(weather_code),
+        "humidity": f"{humidity}%",
+        "source": "open-meteo",
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+
+async def _fetch_live_market_data() -> dict[str, Any]:
+    url = (
+        "https://api.coingecko.com/api/v3/simple/price"
+        "?ids=bitcoin,ethereum,celo&vs_currencies=usd&include_24hr_change=true"
+    )
+    async with httpx.AsyncClient(timeout=MARKET_DATA_TIMEOUT_SECONDS) as client:
+        response = await client.get(url, headers={"accept": "application/json"})
+        response.raise_for_status()
+        payload = response.json()
+
+    bitcoin = payload.get("bitcoin", {}) if isinstance(payload, dict) else {}
+    ethereum = payload.get("ethereum", {}) if isinstance(payload, dict) else {}
+    celo = payload.get("celo", {}) if isinstance(payload, dict) else {}
+    btc_price = bitcoin.get("usd")
+    eth_price = ethereum.get("usd")
+    celo_price = celo.get("usd")
+    btc_change = bitcoin.get("usd_24h_change")
+    eth_change = ethereum.get("usd_24h_change")
+    celo_change = celo.get("usd_24h_change")
+
+    if btc_price is None or eth_price is None or celo_price is None:
+        raise RuntimeError("Live market data missing btc/eth/celo price values")
+
+    trend = "unknown"
+    if (
+        isinstance(btc_change, (int, float))
+        and isinstance(eth_change, (int, float))
+        and isinstance(celo_change, (int, float))
+    ):
+        if btc_change >= 0 and eth_change >= 0 and celo_change >= 0:
+            trend = "bullish"
+        elif btc_change <= 0 and eth_change <= 0 and celo_change <= 0:
+            trend = "bearish"
+        else:
+            trend = "mixed"
+
+    return {
+        "btc_price": str(btc_price),
+        "eth_price": str(eth_price),
+        "celo_price": str(celo_price),
+        "trend": trend,
+        "source": "coingecko",
+    }
 
 
 def _validated_amount_to_units(amount_usdc: float) -> int:
@@ -1680,10 +2157,18 @@ async def _execute_payment_and_record(*, agent_id: str, recipient: str, amount_u
 
 
 @app.get("/api/weather")
-async def get_weather(x_payment_proof: Optional[str] = Header(None)):
+async def get_weather(
+    x_payment_proof: Optional[str] = Header(None),
+    agent_id: Optional[str] = None,
+    x_agent_id: Optional[str] = Header(None, alias="X-Agent-Id"),
+    city: Optional[str] = None,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+):
     recipient = DEFAULT_RECIPIENT
     amount = WEATHER_PRICE_USDC
-    agent_id = DEFAULT_AGENT_ID
+    agent_id = _resolve_agent_id(agent_id, x_agent_id)
+    await _ensure_agent_policy(agent_id)
 
     if not x_payment_proof:
         raise HTTPException(
@@ -1710,21 +2195,42 @@ async def get_weather(x_payment_proof: Optional[str] = Header(None)):
         gas_used=verification["gas_used"],
     )
 
+    weather_payload: dict[str, Any] | None = None
+    if LIVE_WEATHER_DATA:
+        try:
+            weather_payload = await _fetch_live_weather_data(city=city, lat=lat, lon=lon)
+        except Exception as exc:
+            print(f"[weather] live data fetch failed: {exc}")
+
+    if not weather_payload:
+        weather_payload = {
+            "city": WEATHER_CITY,
+            "temperature": "28C",
+            "condition": "Partly Cloudy",
+            "humidity": "65%",
+            "source": "stub",
+        }
+
+    LAST_WEATHER_SNAPSHOT_BY_AGENT[agent_id] = {**weather_payload}
+    LAST_WEATHER_CAPTURED_AT_BY_AGENT[agent_id] = time.time()
+
     return {
-        "city": "Bangalore",
-        "temperature": "28C",
-        "condition": "Partly Cloudy",
-        "humidity": "65%",
+        **weather_payload,
         "paid": True,
         "payment_proof": x_payment_proof,
     }
 
 
 @app.get("/api/data-feed")
-async def get_data_feed(x_payment_proof: Optional[str] = Header(None)):
+async def get_data_feed(
+    x_payment_proof: Optional[str] = Header(None),
+    agent_id: Optional[str] = None,
+    x_agent_id: Optional[str] = Header(None, alias="X-Agent-Id"),
+):
     recipient = DEFAULT_RECIPIENT
     amount = DATA_FEED_PRICE_USDC
-    agent_id = DEFAULT_AGENT_ID
+    agent_id = _resolve_agent_id(agent_id, x_agent_id)
+    await _ensure_agent_policy(agent_id)
 
     if not x_payment_proof:
         raise HTTPException(
@@ -1751,19 +2257,36 @@ async def get_data_feed(x_payment_proof: Optional[str] = Header(None)):
         gas_used=verification["gas_used"],
     )
 
+    market_payload: dict[str, Any] | None = None
+    if LIVE_MARKET_DATA:
+        try:
+            market_payload = await _fetch_live_market_data()
+        except Exception as exc:
+            print(f"[market] live data fetch failed: {exc}")
+
+    if not market_payload:
+        market_payload = {
+            "btc_price": "45000",
+            "eth_price": "2800",
+            "celo_price": "0.70",
+            "trend": "bullish",
+            "source": "stub",
+        }
+
+    LAST_MARKET_SNAPSHOT_BY_AGENT[agent_id] = {"market": "crypto", **market_payload}
+    LAST_MARKET_CAPTURED_AT_BY_AGENT[agent_id] = time.time()
+
     return {
         "market": "crypto",
-        "btc_price": "45000",
-        "eth_price": "2800",
-        "trend": "bullish",
+        **market_payload,
         "paid": True,
         "payment_proof": x_payment_proof,
     }
 
 
 @app.get("/transactions")
-async def get_transactions():
-    rows = await db.fetch_transactions(limit=50)
+async def get_transactions(agent_id: Optional[str] = None):
+    rows = await db.fetch_transactions(limit=50, agent_id=agent_id)
     data = []
     for tx in rows:
         tx["tx_url"] = _tx_url(tx["tx_hash"])
@@ -1777,13 +2300,59 @@ async def get_onchain_transactions():
 
 
 @app.get("/executions")
-async def get_executions():
-    rows = await db.fetch_transactions(limit=50)
+async def get_executions(agent_id: Optional[str] = None):
+    rows = await db.fetch_transactions(limit=50, agent_id=agent_id)
     data = []
     for tx in rows:
         tx["tx_url"] = _tx_url(tx["tx_hash"])
         data.append(tx)
     return {"executions": data}
+
+
+@app.get("/weather-snapshot")
+async def get_weather_snapshot(
+    agent_id: Optional[str] = None,
+    x_agent_id: Optional[str] = Header(None, alias="X-Agent-Id"),
+):
+    resolved_agent_id = _resolve_agent_id(agent_id, x_agent_id)
+    snapshot = LAST_WEATHER_SNAPSHOT_BY_AGENT.get(resolved_agent_id)
+    if not snapshot:
+        return {"available": False, "message": "No paid weather data yet"}
+    captured_at = None
+    age_seconds = None
+    captured = LAST_WEATHER_CAPTURED_AT_BY_AGENT.get(resolved_agent_id)
+    if captured:
+        captured_at = datetime.utcfromtimestamp(captured).isoformat() + "Z"
+        age_seconds = max(0, int(time.time() - captured))
+    return {
+        "available": True,
+        "snapshot": snapshot,
+        "captured_at": captured_at,
+        "age_seconds": age_seconds,
+    }
+
+
+@app.get("/market-snapshot")
+async def get_market_snapshot(
+    agent_id: Optional[str] = None,
+    x_agent_id: Optional[str] = Header(None, alias="X-Agent-Id"),
+):
+    resolved_agent_id = _resolve_agent_id(agent_id, x_agent_id)
+    snapshot = LAST_MARKET_SNAPSHOT_BY_AGENT.get(resolved_agent_id)
+    if not snapshot:
+        return {"available": False, "message": "No paid market data yet"}
+    captured_at = None
+    age_seconds = None
+    captured = LAST_MARKET_CAPTURED_AT_BY_AGENT.get(resolved_agent_id)
+    if captured:
+        captured_at = datetime.utcfromtimestamp(captured).isoformat() + "Z"
+        age_seconds = max(0, int(time.time() - captured))
+    return {
+        "available": True,
+        "snapshot": snapshot,
+        "captured_at": captured_at,
+        "age_seconds": age_seconds,
+    }
 
 
 @app.get("/payment-jobs")
@@ -1812,15 +2381,18 @@ async def get_payment_job(job_key: str):
 
 
 @app.get("/vault-balance")
-async def get_vault_balance():
+async def get_vault_balance(
+    agent_id: Optional[str] = None,
+    x_agent_id: Optional[str] = Header(None, alias="X-Agent-Id"),
+):
     print("[vault-balance] start")
     if MOCK_MODE:
         raise HTTPException(status_code=400, detail={"error": "Vault balance is unavailable in MOCK_MODE"})
     if not w3 or not agent_vault:
         raise HTTPException(status_code=500, detail={"error": "Blockchain client is not configured"})
 
-    agent_id = DEFAULT_AGENT_ID
-    agent_id_bytes = Web3.keccak(text=agent_id)
+    resolved_agent_id = _resolve_agent_id(agent_id, x_agent_id)
+    agent_id_bytes = Web3.keccak(text=resolved_agent_id)
     try:
         balance_units = agent_vault.functions.getBalance(agent_id_bytes).call()
         balance_usdc = balance_units / 10**6
@@ -1896,6 +2468,7 @@ async def execute_demo(
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     _: None = Depends(require_operator_access),
     __: None = Depends(require_agent_signature),
+    ___: None = Depends(require_wallet_signature),
 ):
     try:
         effective = payload or ExecuteDemoRequest()
@@ -1903,6 +2476,71 @@ async def execute_demo(
         print(f"[execute-demo] connecting to RPC: {ALCHEMY_RPC}")
         print(f"[execute-demo] contract address: {AGENT_VAULT_ADDRESS}")
         print(f"[execute-demo] signer address: {account.address if account else 'n/a'}")
+
+        agent_id_value = effective.agent_id.strip()
+        if not agent_id_value:
+            raise HTTPException(status_code=400, detail={"error": "agent_id is required"})
+        await _ensure_agent_policy(agent_id_value)
+
+        requested_actions = [item.lower().strip() for item in (effective.actions or []) if item]
+        if effective.actions is not None:
+            allowed_actions = {"weather", "market"}
+            selected_actions = [item for item in requested_actions if item in allowed_actions]
+            if not selected_actions:
+                raise HTTPException(status_code=400, detail={"error": "No valid demo actions provided"})
+
+            async def _action():
+                demo_results = []
+                base_url = _demo_base_url()
+                weather_params: dict[str, Any] = {"agent_id": agent_id_value}
+                if isinstance(effective.weather_city, str) and effective.weather_city.strip():
+                    weather_params["city"] = effective.weather_city.strip()
+                if effective.weather_lat is not None:
+                    weather_params["lat"] = effective.weather_lat
+                if effective.weather_lon is not None:
+                    weather_params["lon"] = effective.weather_lon
+                for action in selected_actions:
+                    if action == "weather":
+                        endpoint = f"{base_url}/api/weather"
+                        if weather_params:
+                            endpoint = f"{endpoint}?{urlencode(weather_params)}"
+                    else:
+                        endpoint = f"{base_url}/api/data-feed?{urlencode({'agent_id': agent_id_value})}"
+                    try:
+                        result = await call_paid_endpoint(
+                            agent_id=agent_id_value,
+                            endpoint=endpoint,
+                            extra_headers={"X-Agent-Id": agent_id_value},
+                        )
+                    except Exception as exc:
+                        raise HTTPException(status_code=400, detail={"error": str(exc)})
+                    tx_hash = result.get("payment_proof")
+                    demo_results.append(
+                        {
+                            "name": action,
+                            "result": result,
+                            "tx_hash": tx_hash,
+                            "tx_url": _tx_url(tx_hash) if isinstance(tx_hash, str) and tx_hash else None,
+                        }
+                    )
+                return {
+                    "mode": "actions",
+                    "agent_id": agent_id_value,
+                    "actions": demo_results,
+                }
+
+            return await _run_idempotent(
+                key=idempotency_key,
+                endpoint="/execute-demo",
+                payload={
+                    "agent_id": agent_id_value,
+                    "actions": selected_actions,
+                    "weather_city": effective.weather_city,
+                    "weather_lat": effective.weather_lat,
+                    "weather_lon": effective.weather_lon,
+                },
+                action=_action,
+            )
 
         async def _action():
             normalized_payload = ExecutePaymentRequest(
@@ -1959,11 +2597,13 @@ async def agent_execute(
     print("[agent-execute] start")
     if not payload.task.strip():
         raise HTTPException(status_code=400, detail={"error": "Task is required"})
+    resolved_agent_id = _resolve_agent_id(payload.agent_id, None)
+    await _ensure_agent_policy(resolved_agent_id)
 
     async def _action():
         try:
             agent = DemoAgent()
-            return await asyncio.to_thread(agent.run, payload.task)
+            return await asyncio.to_thread(agent.run, payload.task, resolved_agent_id)
         except Exception as e:
             raise HTTPException(status_code=500, detail={"error": f"Agent execution failed: {str(e)}"})
 
@@ -2106,6 +2746,7 @@ async def health_check():
         "operator_auth_required": REQUIRE_OPERATOR_AUTH,
         "idempotency_key_required": REQUIRE_IDEMPOTENCY_KEY,
         "agent_signature_required": REQUIRE_AGENT_SIGNATURE,
+        "wallet_signature_required": REQUIRE_WALLET_SIGNATURE,
         "payment_worker_enabled": PAYMENT_WORKER_ENABLED,
         "payment_worker_running": bool(PAYMENT_WORKER_TASK) if PAYMENT_WORKER_ENABLED else False,
         "dead_letter_count_probe": dead_letter_count,

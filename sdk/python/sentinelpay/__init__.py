@@ -81,3 +81,100 @@ class SentinelPayClient:
         resp = requests.get(f"{self.backend_url}/vault-balance", timeout=30)
         resp.raise_for_status()
         return resp.json().get("balance_usdc", "0.00")
+
+
+import httpx
+
+class AsyncSentinelPayClient:
+    def __init__(
+        self,
+        backend_url: str,
+        agent_id: str,
+        operator_api_key: str | None = None,
+        agent_shared_secret: str | None = None,
+    ):
+        self.backend_url = backend_url.rstrip("/")
+        self.agent_id = agent_id
+        self.operator_api_key = operator_api_key
+        self.agent_shared_secret = agent_shared_secret
+        self._client = httpx.AsyncClient(timeout=180.0)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self._client.aclose()
+
+    async def close(self):
+        await self._client.aclose()
+
+    def _agent_signature_headers(self, method: str, path: str, payload: dict) -> dict:
+        if not self.agent_shared_secret:
+            return {}
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        body_hash = hashlib.sha256(body.encode()).hexdigest()
+        timestamp = str(int(time.time()))
+        message = f"{self.agent_id}:{timestamp}:{method.upper()}:{path}:{body_hash}"
+        signature = hmac.new(
+            self.agent_shared_secret.encode(),
+            message.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return {
+            "X-Agent-Id": self.agent_id,
+            "X-Agent-Timestamp": timestamp,
+            "X-Agent-Signature": signature,
+        }
+
+    def _write_headers(self, *, method: str, path: str, payload: dict, idempotency_key: str | None) -> dict:
+        headers = {"Idempotency-Key": idempotency_key or uuid.uuid4().hex}
+        if self.operator_api_key:
+            headers["X-Operator-Key"] = self.operator_api_key
+        headers.update(self._agent_signature_headers(method, path, payload))
+        return headers
+
+    async def execute_payment(self, amount: float, recipient: str, idempotency_key: str | None = None) -> dict:
+        path = "/execute-payment"
+        payload = {
+            "agent_id": self.agent_id,
+            "amount_usdc": amount,
+            "recipient": recipient,
+        }
+        payload_text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        
+        headers = self._write_headers(method="POST", path=path, payload=payload, idempotency_key=idempotency_key)
+        headers["Content-Type"] = "application/json"
+        
+        resp = await self._client.post(
+            f"{self.backend_url}{path}",
+            content=payload_text,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def execute_demo(self, idempotency_key: str | None = None) -> dict:
+        path = "/execute-demo"
+        payload = {"agent_id": self.agent_id}
+        payload_text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        
+        headers = self._write_headers(method="POST", path=path, payload=payload, idempotency_key=idempotency_key)
+        headers["Content-Type"] = "application/json"
+        
+        resp = await self._client.post(
+            f"{self.backend_url}{path}",
+            content=payload_text,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_executions(self) -> list:
+        resp = await self._client.get(f"{self.backend_url}/executions", timeout=30.0)
+        resp.raise_for_status()
+        return resp.json().get("executions", [])
+
+    async def get_vault_balance(self) -> str:
+        resp = await self._client.get(f"{self.backend_url}/vault-balance", timeout=30.0)
+        resp.raise_for_status()
+        return resp.json().get("balance_usdc", "0.00")
