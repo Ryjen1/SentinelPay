@@ -9,7 +9,7 @@
   [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
   [![Celo Sepolia](https://img.shields.io/badge/Network-Celo%20Sepolia-33d399.svg)](https://celoscan.io/)
 
-  [**Live Web Demo**](https://sentinelpay.vercel.app/) • [**Architecture Docs**](docs/ARCHITECTURE.md) • [**SDK Guide**](docs/DEMO_GUIDE.md)
+  [**Live Web Demo**](https://sentinelpay.vercel.app/) • [**Architecture Docs**](docs/ARCHITECTURE.md) • [**SDK Guide**](docs/SDK_GUIDE.md)
 </div>
 
 ---
