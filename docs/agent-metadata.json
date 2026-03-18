@@ -1,0 +1,35 @@
+{
+  "name": "SentinelPay Weather Agent",
+  "description": "An AI agent that provides real-time weather data while enforcing on-chain spending policies via SentinelPay. Every payment made by this agent is governed by a smart contract policy — enforcing per-transaction limits, daily caps, and whitelisted recipients. Powered by SentinelPay on Celo.",
+  "version": "1.0.0",
+  "type": "financial-agent",
+  "capabilities": [
+    "weather-data-fetch",
+    "usdc-payment",
+    "policy-governed-spending",
+    "idempotent-transactions"
+  ],
+  "owner": "0x1852EBfaBA9CA73bd19760542B5Ab7278F495d0E",
+  "vault": "0x79EDAb09875bfc4aD8F8E56E45561C3E29F7f208",
+  "policyRegistry": "0x9314E31a23E4e3A04B1Df727Fc224361270e9Fc5",
+  "network": "celo-sepolia",
+  "chainId": 44787,
+  "framework": "SentinelPay",
+  "frameworkUrl": "https://sentinelpay.vercel.app",
+  "repository": "https://github.com/Ryjen1/SentinelPay",
+  "policy": {
+    "maxPerTxUSDC": "1.0",
+    "dailyCapUSDC": "5.0",
+    "enforcement": "on-chain",
+    "contract": "PolicyRegistry"
+  },
+  "tags": [
+    "celo",
+    "defi",
+    "agent",
+    "security",
+    "payments",
+    "policy-enforcement",
+    "erc-8004"
+  ]
+}
