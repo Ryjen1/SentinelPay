@@ -1,4 +1,6 @@
 .env
+.env.*.vercel
+.env.vercel
 backend/.env
 contracts/.env
 frontend/.env.local
