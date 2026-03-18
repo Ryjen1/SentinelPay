@@ -3,6 +3,8 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import Navbar from '@/components/Navbar';
+import { useAccount, useReadContract, useSignMessage } from 'wagmi';
+import { formatUnits } from 'viem';
 
 type LogLevel = 'info' | 'success' | 'error' | 'muted' | 'warning';
 
@@ -13,12 +15,19 @@ type LogLine = {
 };
 
 type DemoExecuteResponse = {
+  mode?: 'actions' | 'payment';
   tx_hash?: string;
   tx_url?: string;
   agent_id?: string;
   recipient?: string;
   amount_usdc?: number;
   chain_id?: number;
+  actions?: {
+    name?: string;
+    result?: Record<string, unknown>;
+    tx_hash?: string;
+    tx_url?: string;
+  }[];
   error?: string;
   detail?: { error?: string } | string;
 };
@@ -31,6 +40,7 @@ type HealthResponse = {
   operator_auth_required?: boolean;
   idempotency_key_required?: boolean;
   agent_signature_required?: boolean;
+  wallet_signature_required?: boolean;
   payment_worker_enabled?: boolean;
   payment_worker_running?: boolean;
   dead_letter_count_probe?: number;
@@ -63,6 +73,18 @@ type ExecutionsResponse = {
   executions?: ExecutionRow[];
 };
 
+const DEFAULT_AGENT_ID = process.env.NEXT_PUBLIC_AGENT_ID ?? 'weather_agent';
+const USDC_ADDRESS = process.env.NEXT_PUBLIC_USDC as `0x${string}` | undefined;
+const USDC_ABI = [
+  {
+    inputs: [{ name: 'account', type: 'address' }],
+    name: 'balanceOf',
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+] as const;
+
 function extractErrorMessage(payload: DemoExecuteResponse | null): string {
   if (!payload) return 'Request failed with empty response';
   if (typeof payload.error === 'string' && payload.error.trim()) return payload.error;
@@ -80,6 +102,8 @@ export default function Demo() {
   const [runStatus, setRunStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [lastTxUrl, setLastTxUrl] = useState<string | null>(null);
   const [lastTxHash, setLastTxHash] = useState<string | null>(null);
+  const [demoMode, setDemoMode] = useState<'both' | 'weather' | 'market'>('both');
+  const [useDeviceLocation, setUseDeviceLocation] = useState(true);
   const [lastMeta, setLastMeta] = useState<{
     amount?: number;
     recipient?: string;
@@ -88,14 +112,36 @@ export default function Demo() {
     blockNumber?: number;
     gasUsed?: number;
   } | null>(null);
-  const agentId = process.env.NEXT_PUBLIC_AGENT_ID ?? 'weather_agent';
+  const { address, isConnected } = useAccount();
+  const agentId = address ? `${DEFAULT_AGENT_ID}_${address.toLowerCase()}` : DEFAULT_AGENT_ID;
   const backendBaseUrl = (process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://127.0.0.1:8000').replace(/\/+$/, '');
+  const demoDelayMs = Number(process.env.NEXT_PUBLIC_DEMO_DELAY_MS ?? 1000);
+  const { signMessageAsync } = useSignMessage();
+  const { data: walletUsdcRaw } = useReadContract({
+    address: (USDC_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`,
+    abi: USDC_ABI,
+    functionName: 'balanceOf',
+    args: address ? [address] : undefined,
+    query: { enabled: !!address && !!USDC_ADDRESS },
+  });
+  const walletUsdcBalance =
+    typeof walletUsdcRaw === 'bigint' ? Number(formatUnits(walletUsdcRaw, 6)).toFixed(2) : null;
+  const displayAgentId = (() => {
+    const parts = agentId.split('_');
+    if (parts.length < 2) return agentId;
+    const maybeAddress = parts[parts.length - 1];
+    if (/^0x[0-9a-fA-F]{6,}$/.test(maybeAddress)) {
+      const short = `${maybeAddress.slice(0, 6)}...${maybeAddress.slice(-4)}`;
+      return `${parts.slice(0, -1).join('_')}_${short}`;
+    }
+    return agentId;
+  })();
 
   const appendLog = (text: string, level: LogLevel = 'info') => {
     setLogs(prev => [...prev, { id: Date.now() + prev.length, text, level }]);
   };
 
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, Math.max(ms, demoDelayMs)));
 
   const safeJson = async <T,>(res: Response): Promise<T | null> => {
     try {
@@ -103,6 +149,34 @@ export default function Demo() {
     } catch {
       return null;
     }
+  };
+
+  const requestDeviceLocation = () => {
+    if (typeof window === 'undefined' || !navigator.geolocation) {
+      return Promise.resolve(null as { lat: number; lon: number } | null);
+    }
+    return new Promise<{ lat: number; lon: number } | null>(resolve => {
+      navigator.geolocation.getCurrentPosition(
+        position => {
+          resolve({
+            lat: position.coords.latitude,
+            lon: position.coords.longitude,
+          });
+        },
+        () => resolve(null),
+        { enableHighAccuracy: false, timeout: 8000, maximumAge: 60_000 },
+      );
+    });
+  };
+
+  const buildWalletMessage = (walletAddress: string, timestamp: string) => {
+    return [
+      'SentinelPay Demo Authorization',
+      `Address: ${walletAddress}`,
+      `AgentId: ${agentId}`,
+      `Timestamp: ${timestamp}`,
+      'Path: /execute-demo',
+    ].join('\n');
   };
 
   const runDemo = async () => {
@@ -115,6 +189,16 @@ export default function Demo() {
     setLastMeta(null);
  
     try {
+      if (!isConnected || !address) {
+        appendLog('> Wallet not connected. Please connect your wallet to run the demo.', 'error');
+        await sleep(600);
+        appendLog('---', 'muted');
+        appendLog('> Session complete.', 'info');
+        setRunStatus('error');
+        setDone(true);
+        return;
+      }
+
       appendLog('> Bootstrapping SentinelPay demo runtime...', 'info');
       await sleep(500);
       appendLog(`> Backend: ${backendBaseUrl}`, 'muted');
@@ -123,7 +207,7 @@ export default function Demo() {
       const [healthRes, networkRes, vaultRes] = await Promise.all([
         fetch(`${backendBaseUrl}/health`, { cache: 'no-store' }),
         fetch(`${backendBaseUrl}/network-info`, { cache: 'no-store' }),
-        fetch(`${backendBaseUrl}/vault-balance`, { cache: 'no-store' }),
+        fetch(`${backendBaseUrl}/vault-balance?agent_id=${encodeURIComponent(agentId)}`, { cache: 'no-store' }),
       ]);
 
       const health = healthRes.ok ? await safeJson<HealthResponse>(healthRes) : null;
@@ -135,6 +219,9 @@ export default function Demo() {
           `> Health: ${health.status ?? 'ok'} | DB=${health.database ?? 'n/a'} | Worker=${health.payment_worker_enabled ? 'on' : 'off'}`,
           'success'
         );
+        if (health.wallet_signature_required) {
+          appendLog('> Wallet signature required: yes', 'success');
+        }
       } else {
         appendLog('> Health: unavailable (check backend)', 'warning');
       }
@@ -144,26 +231,75 @@ export default function Demo() {
       }
 
       if (vault?.balance_usdc) {
-        appendLog(`> Vault balance: ${vault.balance_usdc} USDC`, 'success');
+        appendLog(`> Vault balance (agent vault): ${vault.balance_usdc} USDC`, 'success');
       } else {
-        appendLog('> Vault balance: unavailable', 'warning');
+        appendLog('> Vault balance (agent vault): unavailable', 'warning');
+      }
+      if (walletUsdcBalance) {
+        appendLog(`> Wallet USDC balance: ${walletUsdcBalance} USDC`, 'info');
+      } else if (isConnected) {
+        appendLog('> Wallet USDC balance: unavailable', 'warning');
       }
 
-      await sleep(600);
-      appendLog(`> Dispatching /execute-demo for agent "${agentId}"...`, 'info');
+      const selectedActions =
+        demoMode === 'both' ? ['weather', 'market'] : demoMode === 'weather' ? ['weather'] : ['market'];
+
+      await sleep(900);
+      appendLog(`> Demo plan: ${selectedActions.join(' + ')}`, 'info');
+      await sleep(900);
+      appendLog(`> Wallet: ${address.slice(0, 6)} ... ${address.slice(-4)}`, 'info');
+      await sleep(900);
+      appendLog('> Awaiting wallet signature...', 'info');
+      const walletTimestamp = String(Math.floor(Date.now() / 1000));
+      const walletMessage = buildWalletMessage(address, walletTimestamp);
+      let walletSignature: string;
+      try {
+        walletSignature = await signMessageAsync({ message: walletMessage });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        appendLog(`> Wallet signature rejected: ${message}`, 'error');
+        await sleep(600);
+        appendLog('---', 'muted');
+        appendLog('> Session complete.', 'info');
+        setRunStatus('error');
+        setDone(true);
+        return;
+      }
+      appendLog('> Wallet signature captured.', 'success');
+      let weatherLocation: { lat: number; lon: number } | null = null;
+      if (selectedActions.includes('weather') && useDeviceLocation) {
+        appendLog('> Requesting device location...', 'info');
+        weatherLocation = await requestDeviceLocation();
+        if (weatherLocation) {
+          appendLog(`> Location captured: ${weatherLocation.lat.toFixed(4)}, ${weatherLocation.lon.toFixed(4)}`, 'success');
+        } else {
+          appendLog('> Location unavailable. Using default weather city.', 'warning');
+        }
+        await sleep(800);
+      }
+
+      appendLog(`> Dispatching /execute-demo for agent "${displayAgentId}"...`, 'info');
       await sleep(700);
 
       // Perform real execution
       const res = await fetch('/api/demo-execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent_id: agentId }),
+        body: JSON.stringify({
+          agent_id: agentId,
+          actions: selectedActions,
+          weather_lat: weatherLocation?.lat,
+          weather_lon: weatherLocation?.lon,
+          wallet_address: address,
+          wallet_signature: walletSignature,
+          wallet_timestamp: walletTimestamp,
+        }),
       });
       
       const data: DemoExecuteResponse = await res.json().catch(() => null);
       const errorMsg = extractErrorMessage(data);
 
-      if (!res.ok || !data?.tx_hash) {
+      if (!res.ok || (!data?.tx_hash && data?.mode !== 'actions')) {
         appendLog('> Policy engine blocked the request.', 'error');
         await sleep(600);
         appendLog(`> Reason: ${errorMsg}`, 'error');
@@ -175,6 +311,54 @@ export default function Demo() {
         return;
       }
 
+      if (selectedActions.length > 0 && data?.mode !== 'actions' && data?.tx_hash) {
+        appendLog('> Warning: backend returned legacy demo response.', 'warning');
+        appendLog('> Restart backend to enable Weather/Market action mode.', 'warning');
+        await sleep(900);
+      }
+
+      if (data?.mode === 'actions' && Array.isArray(data.actions)) {
+        for (const [index, action] of data.actions.entries()) {
+          const label = action.name ?? `action-${index + 1}`;
+          appendLog(`> Step ${index + 1}: ${label} API`, 'info');
+          await sleep(900);
+          const result = action.result ?? {};
+          const paid = (result as Record<string, unknown>)?.paid ? 'true' : 'false';
+          appendLog(`> Result: paid=${paid}`, 'success');
+          await sleep(900);
+
+          if (label === 'weather') {
+            const city = String((result as Record<string, unknown>)?.city ?? 'n/a');
+            const temp = String((result as Record<string, unknown>)?.temperature ?? 'n/a');
+            const cond = String((result as Record<string, unknown>)?.condition ?? 'n/a');
+            appendLog(`> Data: ${city} | ${temp} | ${cond}`, 'info');
+          } else if (label === 'market') {
+            const btc = String((result as Record<string, unknown>)?.btc_price ?? 'n/a');
+            const eth = String((result as Record<string, unknown>)?.eth_price ?? 'n/a');
+            const celo = String((result as Record<string, unknown>)?.celo_price ?? 'n/a');
+            const trend = String((result as Record<string, unknown>)?.trend ?? 'n/a');
+            appendLog(`> Data: BTC ${btc} | ETH ${eth} | CELO ${celo} | trend ${trend}`, 'info');
+          }
+          await sleep(900);
+
+          if (action.tx_hash) {
+            appendLog(`> Tx confirmed: ${action.tx_hash}`, 'success');
+            setLastTxHash(action.tx_hash);
+          }
+          if (action.tx_url) {
+            appendLog(`> Explorer: ${action.tx_url}`, 'muted');
+            setLastTxUrl(action.tx_url);
+          }
+          await sleep(900);
+        }
+
+        appendLog('---', 'muted');
+        appendLog('> Session complete.', 'info');
+        setRunStatus('success');
+        setDone(true);
+        return;
+      }
+
       const amountValue = typeof data.amount_usdc === 'number' ? data.amount_usdc : Number(data.amount_usdc);
       const amountText = Number.isFinite(amountValue) ? amountValue.toFixed(3) : 'n/a';
       const recipientText = data.recipient ?? 'unknown';
@@ -182,7 +366,7 @@ export default function Demo() {
 
       appendLog(`> Payment authorized by SentinelVault`, 'success');
       await sleep(600);
-      appendLog(`> Agent: ${data.agent_id ?? agentId}`, 'info');
+      appendLog(`> Agent: ${displayAgentId}`, 'info');
       await sleep(450);
       appendLog(`> Amount: ${amountText} USDC`, 'info');
       await sleep(450);
@@ -192,7 +376,7 @@ export default function Demo() {
       await sleep(600);
       appendLog(`> Tx confirmed: ${data.tx_hash}`, 'success');
 
-      setLastTxHash(data.tx_hash);
+      setLastTxHash(data.tx_hash ?? null);
       setLastTxUrl(data.tx_url || null);
       setLastMeta({
         amount: Number.isFinite(amountValue) ? amountValue : undefined,
@@ -206,11 +390,14 @@ export default function Demo() {
         appendLog(`> Explorer: ${data.tx_url}`, 'muted');
       }
 
-      const execRes = await fetch(`${backendBaseUrl}/executions?limit=1`, { cache: 'no-store' }).catch(() => null);
+      const execRes = await fetch(
+        `${backendBaseUrl}/executions?agent_id=${encodeURIComponent(agentId)}`,
+        { cache: 'no-store' }
+      ).catch(() => null);
       if (execRes && execRes.ok) {
         const execPayload = await safeJson<ExecutionsResponse>(execRes);
         const latest = execPayload?.executions?.[0];
-        if (latest?.tx_hash === data.tx_hash) {
+        if (latest && latest.tx_hash === data.tx_hash) {
           const gasUsed = latest.gas_used ?? 0;
           const blockNumber = latest.block_number ?? 0;
           appendLog(`> DB: stored (block ${blockNumber}, gas ${gasUsed})`, 'success');
@@ -239,9 +426,9 @@ export default function Demo() {
   const logColor = (level: LogLevel) => {
     if (level === 'error') return '#f87171';
     if (level === 'success') return '#4ade80';
-    if (level === 'warning') return '#facc15'; // Vibrant Yellow/Gold for Final Answer
+    if (level === 'warning') return '#facc15';
     if (level === 'muted') return '#475569';
-    return '#E2E8F0'; // White/Light Grey for standard logs
+    return '#60a5fa'; // Blue for standard info logs
   };
 
   return (
@@ -315,11 +502,50 @@ export default function Demo() {
           </div>
         </div>
 
+        {/* Demo mode selector */}
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          {[
+            { key: 'weather', label: 'Weather only' },
+            { key: 'market', label: 'Market only' },
+            { key: 'both', label: 'Both' },
+          ].map(option => {
+            const active = demoMode === option.key;
+            return (
+              <button
+                key={option.key}
+                onClick={() => setDemoMode(option.key as typeof demoMode)}
+                className={`text-xs px-4 py-2 rounded-lg border transition ${
+                  active
+                    ? 'bg-cyan-500/10 border-cyan-400 text-cyan-300'
+                    : 'bg-white/[0.02] border-white/[0.08] text-slate-400 hover:text-white'
+                }`}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center gap-3 mb-6 text-xs text-slate-400">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={useDeviceLocation}
+              onChange={e => setUseDeviceLocation(e.target.checked)}
+              className="accent-cyan-400"
+            />
+            Use device location for weather
+          </label>
+          {!useDeviceLocation && (
+            <span className="text-slate-500">Uses default city from backend</span>
+          )}
+        </div>
+
         {/* Controls */}
         <div className="flex items-center gap-4 mb-6">
           <button
             onClick={runDemo}
-            disabled={running}
+            disabled={running || !isConnected}
             className="btn-primary inline-flex items-center gap-2 px-6 py-3 rounded-lg text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {running ? (
@@ -334,7 +560,7 @@ export default function Demo() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M5 3l14 9-14 9V3z" />
                 </svg>
-                {done ? 'Run Again' : 'Run Demo'}
+                {!isConnected ? 'Connect Wallet to Run' : done ? 'Run Again' : 'Run Demo'}
               </>
             )}
           </button>

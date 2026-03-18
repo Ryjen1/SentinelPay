@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
   }
   const agentId = (body.agent_id || process.env.NEXT_PUBLIC_AGENT_ID || "weather_agent").trim();
 
-  const payload = { task };
+  const payload = { task, agent_id: agentId };
   const payloadText = JSON.stringify(payload);
 
   const headers: Record<string, string> = {

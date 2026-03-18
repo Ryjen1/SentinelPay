@@ -6,7 +6,7 @@ import Navbar from '@/components/Navbar';
 export default function Docs() {
   const explorerBaseUrl = process.env.NEXT_PUBLIC_EXPLORER_BASE_URL ?? 'https://sepolia.celoscan.io';
   const vaultAddress = process.env.NEXT_PUBLIC_AGENT_VAULT ?? '0xb829A5A634884c34a2c8AA66a3Fd1b8DEDf9F459';
-  const policyRegistryAddress = process.env.NEXT_PUBLIC_POLICY_REGISTRY ?? '0x9c4b1Df4e663cE12ad58a46B928A08D2c846317B';
+  const policyRegistryAddress = process.env.NEXT_PUBLIC_POLICY_REGISTRY ?? '0x9314E31a23E4e3A04B1Df727Fc224361270e9Fc5';
   const networkLabel = process.env.NEXT_PUBLIC_NETWORK_LABEL ?? 'Celo Sepolia Testnet';
 
   const codeBlockStyle = {
@@ -75,7 +75,7 @@ PRIVATE_KEY=your_operator_wallet_key
 CELO_RPC=https://celo-sepolia.g.alchemy.com/v2/YOUR_API_KEY
 CHAIN_ID=11142220
 AGENT_VAULT_ADDRESS=0xb829A5A634884c34a2c8AA66a3Fd1b8DEDf9F459
-POLICY_REGISTRY_ADDRESS=0x9c4b1Df4e663cE12ad58a46B928A08D2c846317B
+POLICY_REGISTRY_ADDRESS=0x9314E31a23E4e3A04B1Df727Fc224361270e9Fc5
 USDC_ADDRESS=0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582
 MOCK_PAYMENT=false`}</div>
           </div>

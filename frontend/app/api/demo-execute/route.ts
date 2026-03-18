@@ -33,6 +33,13 @@ export async function POST(request: NextRequest) {
     recipient?: string;
     amount_usdc?: number;
     reason?: string;
+    wallet_address?: string;
+    wallet_signature?: string;
+    wallet_timestamp?: string;
+    actions?: string[];
+    weather_city?: string;
+    weather_lat?: number;
+    weather_lon?: number;
   } = {};
   try {
     body = await request.json();
@@ -50,6 +57,10 @@ export async function POST(request: NextRequest) {
     recipient?: string;
     amount_usdc?: number;
     reason?: string;
+    actions?: string[];
+    weather_city?: string;
+    weather_lat?: number;
+    weather_lon?: number;
   } = { agent_id: agentId };
   if (typeof body.recipient === "string" && body.recipient.trim()) {
     payload.recipient = body.recipient.trim();
@@ -60,12 +71,31 @@ export async function POST(request: NextRequest) {
   if (typeof body.reason === "string" && body.reason.trim()) {
     payload.reason = body.reason.trim();
   }
+  if (Array.isArray(body.actions) && body.actions.length > 0) {
+    payload.actions = body.actions.filter(item => typeof item === "string" && item.trim());
+  }
+  if (typeof body.weather_city === "string" && body.weather_city.trim()) {
+    payload.weather_city = body.weather_city.trim();
+  }
+  if (typeof body.weather_lat === "number" && Number.isFinite(body.weather_lat)) {
+    payload.weather_lat = body.weather_lat;
+  }
+  if (typeof body.weather_lon === "number" && Number.isFinite(body.weather_lon)) {
+    payload.weather_lon = body.weather_lon;
+  }
   const payloadText = JSON.stringify(payload);
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "Idempotency-Key": randomUUID().replace(/-/g, ""),
   };
+
+  if (body.wallet_address && body.wallet_signature && body.wallet_timestamp) {
+    headers["X-Wallet-Address"] = body.wallet_address;
+    headers["X-Wallet-Signature"] = body.wallet_signature;
+    headers["X-Wallet-Timestamp"] = body.wallet_timestamp;
+    headers["X-Wallet-Agent-Id"] = agentId;
+  }
 
   const operatorApiKey = process.env.OPERATOR_API_KEY;
   if (operatorApiKey) {

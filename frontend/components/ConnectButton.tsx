@@ -41,7 +41,7 @@ export default function ConnectButton() {
       <div className="flex items-center gap-3">
         <div className="text-right">
           <div className="text-xs font-mono text-white">
-            {address?.slice(0, 6)}...{address?.slice(-4)}
+            {address?.slice(0, 6)} ... {address?.slice(-4)}
           </div>
           <div className="text-xs" style={{ color: '#A78BFA' }}>
             {typeof usdcBalance === 'bigint' ? Number(formatUnits(usdcBalance, 6)).toFixed(2) : '0.00'} USDC

@@ -31,7 +31,7 @@ export default function Home() {
   const backendBaseUrl = (process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://127.0.0.1:8000').replace(/\/+$/, '');
   const vaultAddress = process.env.NEXT_PUBLIC_AGENT_VAULT;
   const policyRegistryAddress =
-    process.env.NEXT_PUBLIC_POLICY_REGISTRY ?? '0x9c4b1Df4e663cE12ad58a46B928A08D2c846317B';
+    process.env.NEXT_PUBLIC_POLICY_REGISTRY ?? '0x9314E31a23E4e3A04B1Df727Fc224361270e9Fc5';
 
   const [feed, setFeed] = useState<FeedEntry[]>([]);
   const feedRef = useRef<HTMLDivElement>(null);

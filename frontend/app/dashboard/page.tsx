@@ -10,12 +10,14 @@ import Navbar from '@/components/Navbar';
 // ── Contract addresses (Celo Sepolia by default) ─────────────────────────
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_AGENT_VAULT || '0x0000000000000000000000000000000000000000') as `0x${string}`;
 const USDC_ADDRESS = (process.env.NEXT_PUBLIC_USDC || '0x0000000000000000000000000000000000000000') as `0x${string}`;
-const AGENT_ID = process.env.NEXT_PUBLIC_AGENT_ID ?? 'weather_agent';
+const DEFAULT_AGENT_ID = process.env.NEXT_PUBgLIC_AGENT_ID ?? 'weather_agent';
 const NETWORK_LABEL = process.env.NEXT_PUBLIC_NETWORK_LABEL ?? 'Celo Sepolia Testnet';
 const EXPLORER_BASE_URL = process.env.NEXT_PUBLIC_EXPLORER_BASE_URL ?? 'https://sepolia.celoscan.io';
 const TARGET_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? '11142220');
 const TARGET_CHAIN_HEX = `0x${TARGET_CHAIN_ID.toString(16)}`;
-const POLICY_REGISTRY_ADDRESS = (process.env.NEXT_PUBLIC_POLICY_REGISTRY || '0x9c4b1Df4e663cE12ad58a46B928A08D2c846317B') as `0x${string}`;
+const POLICY_REGISTRY_ADDRESS = (process.env.NEXT_PUBLIC_POLICY_REGISTRY || '0x9314E31a23E4e3A04B1Df727Fc224361270e9Fc5') as `0x${string}`;
+const BACKEND_BASE_URL = (process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://127.0.0.1:8000').replace(/\/+$/, '');
+const EXECUTION_PAGE_SIZE = 15;
 
 if (!VAULT_ADDRESS || !USDC_ADDRESS) {
   console.warn('[dashboard] Missing NEXT_PUBLIC_AGENT_VAULT or NEXT_PUBLIC_USDC - functionality will be limited.');
@@ -127,11 +129,42 @@ type ApiErrorPayload = {
   detail?: string | { error?: string };
 };
 
+type MarketSnapshotResponse = {
+  available?: boolean;
+  snapshot?: {
+    market?: string;
+    btc_price?: string;
+    eth_price?: string;
+    celo_price?: string;
+    trend?: string;
+    source?: string;
+  };
+  captured_at?: string;
+  age_seconds?: number;
+  message?: string;
+};
+
+type WeatherSnapshotResponse = {
+  available?: boolean;
+  snapshot?: {
+    city?: string;
+    temperature?: string;
+    condition?: string;
+    humidity?: string;
+    source?: string;
+  };
+  captured_at?: string;
+  age_seconds?: number;
+  message?: string;
+};
+
 export default function Dashboard() {
   const { address } = useAccount();
+  const activeAgentId = address ? `${DEFAULT_AGENT_ID}_${address.toLowerCase()}` : DEFAULT_AGENT_ID;
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [visibleTxCount, setVisibleTxCount] = useState(EXECUTION_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const [showEditPolicy, setShowEditPolicy] = useState(false);
   const [maxPerTx, setMaxPerTx] = useState('1.00');
@@ -160,14 +193,36 @@ export default function Dashboard() {
   const [agentResult, setAgentResult] = useState<{ steps: string[]; tx_hash?: string | null } | null>(null);
   const [agentRunning, setAgentRunning] = useState(false);
   const [healthStatus, setHealthStatus] = useState<{ status: string; network: string; database: string; mock_mode: boolean } | null>(null);
+  const [weatherSnapshot, setWeatherSnapshot] = useState<WeatherSnapshotResponse | null>(null);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [weatherError, setWeatherError] = useState<string | null>(null);
+  const [marketSnapshot, setMarketSnapshot] = useState<MarketSnapshotResponse | null>(null);
+  const [marketLoading, setMarketLoading] = useState(false);
+  const [marketError, setMarketError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const isOwner = !!address && !!policyOwner && address.toLowerCase() === policyOwner.toLowerCase();
   const canEditPolicy = !policyOwner || isOwner;
+  const visibleTxTotal = Math.min(visibleTxCount, transactions.length);
+  const visibleTransactions = transactions.slice(0, visibleTxTotal);
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ type, message });
     window.setTimeout(() => setToast(null), 4500);
   };
+
+  const formatAgentId = (id: string) => {
+    if (!id) return id;
+    const parts = id.split('_');
+    if (parts.length < 2) return id;
+    const maybeAddress = parts[parts.length - 1];
+    if (/^0x[0-9a-fA-F]{6,}$/.test(maybeAddress)) {
+      const short = `${maybeAddress.slice(0, 6)} ... ${maybeAddress.slice(-4)}`;
+      return `${parts.slice(0, -1).join('_')}_${short}`;
+    }
+    return id;
+  };
+
+  const displayAgentId = formatAgentId(activeAgentId);
 
   const getApiErrorMessage = (payload: ApiErrorPayload, fallback: string) => {
     const topLevel = typeof payload.error === 'string' ? payload.error.trim() : '';
@@ -239,7 +294,7 @@ export default function Dashboard() {
     }
 
     const amountUnits = parseUnits(depositAmount, 6);
-    const agentIdBytes = keccak256(toBytes(AGENT_ID));
+    const agentIdBytes = keccak256(toBytes(activeAgentId));
 
     try {
       await ensureWalletOnTargetChain();
@@ -263,7 +318,7 @@ export default function Dashboard() {
       setDepositStatus('depositing');
       console.log('[SentinelPay] Step 2 – Depositing into SentinelVault…', {
         vault: VAULT_ADDRESS,
-        agentId: AGENT_ID,
+        agentId: activeAgentId,
         agentIdBytes,
         amount: amountUnits.toString(),
       });
@@ -292,7 +347,7 @@ export default function Dashboard() {
 
   const fetchExecutions = (showLoading = true) => {
     if (showLoading) setLoading(true);
-    fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/executions`)
+    fetch(`${BACKEND_BASE_URL}/executions?agent_id=${encodeURIComponent(activeAgentId)}`)
       .then(r => r.json())
       .then(data => {
         setTransactions(data.executions || []);
@@ -328,7 +383,7 @@ export default function Dashboard() {
 
   const fetchVaultBalance = () => {
     setBalanceLoading(true);
-    fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/vault-balance`)
+    fetch(`${BACKEND_BASE_URL}/vault-balance?agent_id=${encodeURIComponent(activeAgentId)}`)
       .then(r => r.json())
       .then(data => {
         setVaultBalance(data.balance_usdc ?? '—');
@@ -348,10 +403,40 @@ export default function Dashboard() {
   };
 
   const fetchHealth = () => {
-    fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/health`)
+    fetch(`${BACKEND_BASE_URL}/health`)
       .then(r => r.json())
       .then(data => setHealthStatus(data))
       .catch(() => setHealthStatus(null));
+  };
+
+  const fetchMarketSnapshot = () => {
+    setMarketLoading(true);
+    setMarketError(null);
+    fetch(`${BACKEND_BASE_URL}/market-snapshot?agent_id=${encodeURIComponent(activeAgentId)}`)
+      .then(r => r.json())
+      .then((data: MarketSnapshotResponse) => {
+        setMarketSnapshot(data);
+        setMarketLoading(false);
+      })
+      .catch(() => {
+        setMarketError('Unable to load market snapshot');
+        setMarketLoading(false);
+      });
+  };
+
+  const fetchWeatherSnapshot = () => {
+    setWeatherLoading(true);
+    setWeatherError(null);
+    fetch(`${BACKEND_BASE_URL}/weather-snapshot?agent_id=${encodeURIComponent(activeAgentId)}`)
+      .then(r => r.json())
+      .then((data: WeatherSnapshotResponse) => {
+        setWeatherSnapshot(data);
+        setWeatherLoading(false);
+      })
+      .catch(() => {
+        setWeatherError('Unable to load weather snapshot');
+        setWeatherLoading(false);
+      });
   };
 
   const runAgent = async () => {
@@ -362,7 +447,7 @@ export default function Dashboard() {
       const res = await fetch('/api/agent-execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task: agentTask, agent_id: AGENT_ID }),
+        body: JSON.stringify({ task: agentTask, agent_id: activeAgentId }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({} as ApiErrorPayload));
@@ -386,7 +471,7 @@ export default function Dashboard() {
       const res = await fetch('/api/demo-execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent_id: AGENT_ID }),
+        body: JSON.stringify({ agent_id: activeAgentId }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({} as ApiErrorPayload));
@@ -408,7 +493,7 @@ export default function Dashboard() {
     if (!POLICY_REGISTRY_ADDRESS || POLICY_REGISTRY_ADDRESS === '0x0000000000000000000000000000000000000000') return;
     setPolicyLoading(true);
     try {
-      const agentIdBytes = keccak256(toBytes(AGENT_ID));
+      const agentIdBytes = keccak256(toBytes(activeAgentId));
       const owner = await publicClient.readContract({
         address: POLICY_REGISTRY_ADDRESS,
         abi: POLICY_REGISTRY_ABI,
@@ -480,7 +565,7 @@ export default function Dashboard() {
 
     try {
       await ensureWalletOnTargetChain();
-      const agentIdBytes = keccak256(toBytes(AGENT_ID));
+      const agentIdBytes = keccak256(toBytes(activeAgentId));
       const updateArgs = [agentIdBytes, parseUnits(maxPerTx, 6), parseUnits(dailyCap, 6)] as const;
       const whitelistArg = [whitelistRecipient as `0x${string}`] as readonly `0x${string}`[];
       const registerArgs = [agentIdBytes, parseUnits(maxPerTx, 6), parseUnits(dailyCap, 6), whitelistArg] as const;
@@ -529,7 +614,7 @@ export default function Dashboard() {
     setPauseTxPending(true);
     try {
       await ensureWalletOnTargetChain();
-      const agentIdBytes = keccak256(toBytes(AGENT_ID));
+      const agentIdBytes = keccak256(toBytes(activeAgentId));
       const functionName = (isPaused ? 'unpauseAgent' : 'pauseAgent') as 'pauseAgent' | 'unpauseAgent';
       const txHash = await writeContractAsync({
         address: POLICY_REGISTRY_ADDRESS,
@@ -559,13 +644,19 @@ export default function Dashboard() {
     fetchVaultBalance();
     fetchNetworkInfo();
     fetchHealth();
+    fetchWeatherSnapshot();
+    fetchMarketSnapshot();
     loadPolicy();
     const balanceInterval = setInterval(fetchVaultBalance, 10000);
+    const weatherInterval = setInterval(fetchWeatherSnapshot, 15000);
+    const marketInterval = setInterval(fetchMarketSnapshot, 15000);
     return () => {
       clearInterval(balanceInterval);
+      clearInterval(weatherInterval);
+      clearInterval(marketInterval);
       stopPolling();
     };
-  }, [publicClient]);
+  }, [publicClient, activeAgentId]);
 
   const S = {
     bg: 'var(--primary-bg)',
@@ -637,7 +728,7 @@ export default function Dashboard() {
         </div>
 
         {/* ── Bento row 1: Status + Policy + Contracts ── */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
 
           {/* Agent status */}
           <div
@@ -663,8 +754,8 @@ export default function Dashboard() {
               </div>
             </div>
             
-            <Link href={`https://agentscan.xyz/agent/${AGENT_ID}`} target="_blank" className="block mt-2 mb-5 group/link relative z-10">
-              <div className="font-mono font-bold text-lg mb-1" style={{ color: S.textPrimary }}>{AGENT_ID}</div>
+            <Link href={`https://agentscan.xyz/agent/${activeAgentId}`} target="_blank" className="block mt-2 mb-5 group/link relative z-10">
+              <div className="font-mono font-bold text-lg mb-1" style={{ color: S.textPrimary }}>{displayAgentId}</div>
               <div className="text-xs font-medium flex items-center gap-1 transition-colors group-hover/link:underline" style={{ color: S.accentLight }}>
                 View on AgentScan (optional)
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17l9.2-9.2M17 17V7H7"/></svg>
@@ -769,7 +860,7 @@ export default function Dashboard() {
         </div>
 
         {/* ── Bento row 2: Health + Network ── */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
 
           {/* Health */}
           <div className="rounded-2xl p-6 card-interactive backdrop-blur-md" style={{ backgroundColor: 'rgba(18, 18, 22, 0.7)', border: `1px solid ${S.border}` }}>
@@ -828,6 +919,111 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* ── Data snapshots: Weather + Market ── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          {/* Weather snapshot */}
+          <div className="rounded-2xl p-6 card-interactive backdrop-blur-md relative overflow-hidden" style={{ backgroundColor: 'rgba(18, 18, 22, 0.7)', border: `1px solid ${S.border}` }}>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-mono uppercase tracking-widest font-medium" style={{ color: S.muted }}>Weather Snapshot</span>
+              <button
+                onClick={fetchWeatherSnapshot}
+                className="text-[10px] uppercase tracking-widest px-2.5 py-1 rounded border"
+                style={{ color: S.accentLight, borderColor: S.borderGlow, backgroundColor: 'rgba(147,51,234,0.08)' }}
+              >
+                Refresh
+              </button>
+            </div>
+            {weatherLoading ? (
+              <div className="mt-6 flex justify-center items-center">
+                <div className="animate-spin rounded-full h-7 w-7 border-b-2" style={{ borderColor: S.accent }}></div>
+              </div>
+            ) : weatherSnapshot?.available && weatherSnapshot.snapshot ? (
+              <div className="mt-5 space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: S.muted }}>City</span>
+                  <span style={{ color: S.textPrimary }}>{weatherSnapshot.snapshot.city ?? '—'}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: S.muted }}>Temp</span>
+                  <span style={{ color: S.textPrimary }}>{weatherSnapshot.snapshot.temperature ?? '—'}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: S.muted }}>Condition</span>
+                  <span style={{ color: S.textPrimary }}>{weatherSnapshot.snapshot.condition ?? '—'}</span>
+                </div>
+                <div className="flex justify-between text-xs pt-2">
+                  <span style={{ color: S.muted }}>Humidity</span>
+                  <span style={{ color: S.accentLight }}>{weatherSnapshot.snapshot.humidity ?? '—'}</span>
+                </div>
+                <div className="flex justify-between text-[10px] pt-1" style={{ color: S.dim }}>
+                  <span>Source</span>
+                  <span>{weatherSnapshot.snapshot.source ?? 'unknown'}</span>
+                </div>
+                {weatherSnapshot.age_seconds !== undefined && (
+                  <div className="text-[10px] pt-1" style={{ color: S.dim }}>
+                    Updated {weatherSnapshot.age_seconds}s ago
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="mt-6 text-xs" style={{ color: S.muted }}>
+                {weatherError || weatherSnapshot?.message || 'Run the demo to capture the first weather snapshot.'}
+              </div>
+            )}
+          </div>
+
+          {/* Market snapshot */}
+          <div className="rounded-2xl p-6 card-interactive backdrop-blur-md relative overflow-hidden" style={{ backgroundColor: 'rgba(18, 18, 22, 0.7)', border: `1px solid ${S.border}` }}>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-mono uppercase tracking-widest font-medium" style={{ color: S.muted }}>Market Snapshot</span>
+              <button
+                onClick={fetchMarketSnapshot}
+                className="text-[10px] uppercase tracking-widest px-2.5 py-1 rounded border"
+                style={{ color: S.accentLight, borderColor: S.borderGlow, backgroundColor: 'rgba(147,51,234,0.08)' }}
+              >
+                Refresh
+              </button>
+            </div>
+            {marketLoading ? (
+              <div className="mt-6 flex justify-center items-center">
+                <div className="animate-spin rounded-full h-7 w-7 border-b-2" style={{ borderColor: S.accent }}></div>
+              </div>
+            ) : marketSnapshot?.available && marketSnapshot.snapshot ? (
+              <div className="mt-5 space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: S.muted }}>BTC</span>
+                  <span style={{ color: S.textPrimary }}>${marketSnapshot.snapshot.btc_price ?? '—'}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: S.muted }}>ETH</span>
+                  <span style={{ color: S.textPrimary }}>${marketSnapshot.snapshot.eth_price ?? '—'}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: S.muted }}>CELO</span>
+                  <span style={{ color: S.textPrimary }}>${marketSnapshot.snapshot.celo_price ?? '—'}</span>
+                </div>
+                <div className="flex justify-between text-xs pt-2">
+                  <span style={{ color: S.muted }}>Trend</span>
+                  <span style={{ color: S.accentLight }}>{marketSnapshot.snapshot.trend ?? '—'}</span>
+                </div>
+                <div className="flex justify-between text-[10px] pt-1" style={{ color: S.dim }}>
+                  <span>Source</span>
+                  <span>{marketSnapshot.snapshot.source ?? 'unknown'}</span>
+                </div>
+                {marketSnapshot.age_seconds !== undefined && (
+                  <div className="text-[10px] pt-1" style={{ color: S.dim }}>
+                    Updated {marketSnapshot.age_seconds}s ago
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="mt-6 text-xs" style={{ color: S.muted }}>
+                {marketError || marketSnapshot?.message || 'Run the demo to capture the first market snapshot.'}
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* ── Execution Feed ── */}
         <div
           className="rounded-2xl mb-4 card-interactive backdrop-blur-md overflow-hidden relative"
@@ -853,7 +1049,7 @@ export default function Dashboard() {
               )}
               {dbStatus && (
                 <span className="text-xs font-mono px-2 py-0.5 rounded bg-white/5 border border-white/5" style={{ color: S.muted }}>
-                  {dbStatus.row_count} records
+                  Showing {visibleTxTotal} / {dbStatus.row_count} records
                 </span>
               )}
             </div>
@@ -918,7 +1114,7 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {transactions.map((tx, idx) => (
+                  {visibleTransactions.map((tx, idx) => (
                     <tr
                       key={tx.id}
                       className="transition-colors hover:bg-white/5"
@@ -928,8 +1124,12 @@ export default function Dashboard() {
                         {new Date(tx.timestamp * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                       </td>
                       <td className="px-6 py-4">
-                        <span className="text-xs font-mono font-medium px-2 py-1 rounded-md bg-white/5 border border-white/10" style={{ color: S.textPrimary }}>
-                          {tx.agent_id}
+                        <span
+                          className="text-xs font-mono font-medium px-2 py-1 rounded-md bg-white/5 border border-white/10"
+                          style={{ color: S.textPrimary }}
+                          title={tx.agent_id}
+                        >
+                          {formatAgentId(tx.agent_id)}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-sm font-bold font-mono text-white">
@@ -998,6 +1198,33 @@ export default function Dashboard() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+          {transactions.length > EXECUTION_PAGE_SIZE && (
+            <div className="px-6 py-4 border-t border-white/5 flex items-center justify-between">
+              <span className="text-xs" style={{ color: S.muted }}>
+                {visibleTxTotal} shown
+              </span>
+              <div className="flex items-center gap-2">
+                {visibleTxTotal < transactions.length && (
+                  <button
+                    onClick={() => setVisibleTxCount(count => Math.min(count + EXECUTION_PAGE_SIZE, transactions.length))}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg border transition"
+                    style={{ backgroundColor: 'rgba(59,130,246,0.08)', borderColor: 'rgba(59,130,246,0.35)', color: '#60a5fa' }}
+                  >
+                    ▼ Show 15 more
+                  </button>
+                )}
+                {visibleTxTotal > EXECUTION_PAGE_SIZE && (
+                  <button
+                    onClick={() => setVisibleTxCount(EXECUTION_PAGE_SIZE)}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg border transition"
+                    style={{ backgroundColor: 'rgba(148,163,184,0.08)', borderColor: 'rgba(148,163,184,0.3)', color: '#cbd5f5' }}
+                  >
+                    ▲ Show less
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </div>
