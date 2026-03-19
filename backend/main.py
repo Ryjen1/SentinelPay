@@ -1388,7 +1388,7 @@ async def _send_execute_payment_tx(
         raise HTTPException(status_code=500, detail={"error": "Blockchain client is not configured"})
 
     global NONCE_CACHE
-    for attempt in range(2):
+    for attempt in range(4):
         async with NONCE_LOCK:
             pending_nonce = await asyncio.to_thread(w3.eth.get_transaction_count, account.address, "pending")
             if NONCE_CACHE is None or NONCE_CACHE < pending_nonce:
@@ -1415,8 +1415,8 @@ async def _send_execute_payment_tx(
                 tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.rawTransaction)
                 NONCE_CACHE = nonce + 1
             except Exception as exc:
-                if attempt == 0 and _is_nonce_issue(exc):
-                    NONCE_CACHE = None
+                if attempt < 3 and _is_nonce_issue(exc):
+                    NONCE_CACHE = nonce + 1
                     continue
                 raise HTTPException(status_code=500, detail={"error": f"Failed to submit transaction: {str(exc)}"})
 
@@ -1424,12 +1424,12 @@ async def _send_execute_payment_tx(
             receipt = await asyncio.to_thread(w3.eth.wait_for_transaction_receipt, tx_hash, 180)
             return tx_hash.hex(), receipt
         except Exception as exc:
-            if attempt == 0 and _is_nonce_issue(exc):
-                NONCE_CACHE = None
+            if attempt < 3 and _is_nonce_issue(exc):
+                NONCE_CACHE = nonce + 1
                 continue
             raise HTTPException(status_code=500, detail={"error": f"Transaction confirmation failed: {str(exc)}"})
 
-    raise HTTPException(status_code=500, detail={"error": "Unable to obtain a valid nonce for transaction"})
+    raise HTTPException(status_code=500, detail={"error": "Unable to obtain a valid nonce for transaction after multiple attempts"})
 
 
 async def _send_owner_tx(build_tx_fn) -> tuple[str, dict]:
@@ -1437,7 +1437,7 @@ async def _send_owner_tx(build_tx_fn) -> tuple[str, dict]:
         raise HTTPException(status_code=500, detail={"error": "Blockchain client is not configured"})
 
     global NONCE_CACHE
-    for attempt in range(2):
+    for attempt in range(4):
         async with NONCE_LOCK:
             pending_nonce = await asyncio.to_thread(w3.eth.get_transaction_count, account.address, "pending")
             if NONCE_CACHE is None or NONCE_CACHE < pending_nonce:
@@ -1452,8 +1452,8 @@ async def _send_owner_tx(build_tx_fn) -> tuple[str, dict]:
                 tx_hash = await asyncio.to_thread(w3.eth.send_raw_transaction, signed.rawTransaction)
                 NONCE_CACHE = nonce + 1
             except Exception as exc:
-                if attempt == 0 and _is_nonce_issue(exc):
-                    NONCE_CACHE = None
+                if attempt < 3 and _is_nonce_issue(exc):
+                    NONCE_CACHE = nonce + 1
                     continue
                 raise HTTPException(status_code=500, detail={"error": f"Failed to submit transaction: {str(exc)}"})
 
