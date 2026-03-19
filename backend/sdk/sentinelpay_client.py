@@ -221,25 +221,44 @@ async def call_paid_endpoint(agent_id: str, endpoint: str, *, extra_headers: dic
             except Exception as e:
                 raise Exception(_format_execute_payment_revert(e))
 
-            nonce = _w3.eth.get_transaction_count(_account.address)
+            global _NONCE_CACHE
+            if '_NONCE_CACHE' not in globals():
+                _NONCE_CACHE = None
 
-            transaction = _vault.functions.executePayment(
-                agent_id_bytes,
-                recipient_address,
-                amount_units,
-            ).build_transaction(
-                {
-                    "from": _account.address,
-                    "nonce": nonce,
-                    "gas": 300000,
-                    "gasPrice": _w3.eth.gas_price,
-                    "chainId": _w3.eth.chain_id,
-                }
-            )
+            for attempt in range(4):
+                try:
+                    pending_nonce = _w3.eth.get_transaction_count(_account.address, "pending")
+                    if _NONCE_CACHE is None or _NONCE_CACHE < pending_nonce:
+                        _NONCE_CACHE = pending_nonce
+                    nonce = _NONCE_CACHE
 
-            signed_txn = _account.sign_transaction(transaction)
-            tx_hash = _w3.eth.send_raw_transaction(signed_txn.rawTransaction)
-            tx_hash_hex = tx_hash.hex()
+                    transaction = _vault.functions.executePayment(
+                        agent_id_bytes,
+                        recipient_address,
+                        amount_units,
+                    ).build_transaction(
+                        {
+                            "from": _account.address,
+                            "nonce": nonce,
+                            "gas": 300000,
+                            "gasPrice": _w3.eth.gas_price,
+                            "chainId": _w3.eth.chain_id,
+                        }
+                    )
+
+                    signed_txn = _account.sign_transaction(transaction)
+                    tx_hash = _w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+                    tx_hash_hex = tx_hash.hex()
+                    _NONCE_CACHE = nonce + 1
+                    break
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if attempt < 3 and ("nonce too low" in err_str or "already known" in err_str or "replacement transaction underpriced" in err_str or "nonce has already been used" in err_str):
+                        _NONCE_CACHE = nonce + 1
+                        import asyncio
+                        await asyncio.sleep(1)
+                        continue
+                    raise Exception(f"Failed to submit transaction: {e}")
 
             try:
                 receipt = _w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
