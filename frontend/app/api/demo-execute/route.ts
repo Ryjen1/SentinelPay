@@ -97,6 +97,15 @@ export async function POST(request: NextRequest) {
     headers["X-Wallet-Agent-Id"] = agentId;
   }
 
+  // Forward Delegation headers
+  const xDelegationSig = request.headers.get("X-Delegation-Signature");
+  const xDelegationData = request.headers.get("X-Delegation-Data");
+  const xWalletAddr = request.headers.get("X-Wallet-Address");
+
+  if (xDelegationSig) headers["X-Delegation-Signature"] = xDelegationSig;
+  if (xDelegationData) headers["X-Delegation-Data"] = xDelegationData;
+  if (xWalletAddr) headers["X-Wallet-Address"] = xWalletAddr;
+
   const operatorApiKey = process.env.OPERATOR_API_KEY;
   if (operatorApiKey) {
     headers["X-Operator-Key"] = operatorApiKey;

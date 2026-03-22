@@ -49,6 +49,28 @@ export async function POST(request: NextRequest) {
     "Idempotency-Key": randomUUID().replace(/-/g, ""),
   };
 
+  const bodyData = body as any;
+
+  // Forward Wallet Signature headers (Interactive Fallback)
+  const xWalletSig = request.headers.get("X-Wallet-Signature") || bodyData.wallet_signature;
+  const xWalletTs = request.headers.get("X-Wallet-Timestamp") || bodyData.wallet_timestamp;
+  const xWalletAgentId = request.headers.get("X-Wallet-Agent-Id") || agentId;
+  const xWalletAddrHeader = request.headers.get("X-Wallet-Address") || bodyData.wallet_address;
+
+  if (xWalletSig) headers["X-Wallet-Signature"] = xWalletSig;
+  if (xWalletTs) headers["X-Wallet-Timestamp"] = xWalletTs;
+  if (xWalletAgentId) headers["X-Wallet-Agent-Id"] = xWalletAgentId;
+  if (xWalletAddrHeader) headers["X-Wallet-Address"] = xWalletAddrHeader;
+
+  // Forward Delegation headers
+  const xDelegationSig = request.headers.get("X-Delegation-Signature");
+  const xDelegationData = request.headers.get("X-Delegation-Data");
+  const xWalletAddr = request.headers.get("X-Wallet-Address") || bodyData.wallet_address;
+
+  if (xDelegationSig) headers["X-Delegation-Signature"] = xDelegationSig;
+  if (xDelegationData) headers["X-Delegation-Data"] = xDelegationData;
+  if (xWalletAddr) headers["X-Wallet-Address"] = xWalletAddr;
+
   const operatorApiKey = process.env.OPERATOR_API_KEY;
   if (operatorApiKey) {
     headers["X-Operator-Key"] = operatorApiKey;
