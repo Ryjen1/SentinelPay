@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { Providers } from "./providers";
-
+import HackathonBadges from "@/components/HackathonBadges";
 export const metadata: Metadata = {
   title: "SentinelPay | Policy-Enforced Agent Payments",
   description: "Policy-Enforced Agent Payments for Autonomous AI Agents on Celo — Policy-Enforced, On-Chain Verified.",
@@ -26,7 +26,10 @@ export default function RootLayout({
         />
       </head>
       <body className="antialiased">
-        <Providers>{children}</Providers>
+        <Providers>
+          {children}
+          <HackathonBadges />
+        </Providers>
       </body>
     </html>
   );

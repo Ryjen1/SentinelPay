@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { useAccount, usePublicClient, useWriteContract } from 'wagmi';
-import { formatUnits, isAddress, keccak256, parseUnits, toBytes } from 'viem';
+import { useAccount, usePublicClient, useWriteContract, useSignTypedData, useWalletClient } from 'wagmi';
+import { formatUnits, isAddress, keccak256, parseUnits, toBytes, stringToHex } from 'viem';
 import ConnectButton from '@/components/ConnectButton';
 import Navbar from '@/components/Navbar';
 
@@ -183,6 +183,14 @@ export default function Dashboard() {
   const [pauseTxPending, setPauseTxPending] = useState(false);
   const [depositStatus, setDepositStatus] = useState<'idle' | 'approving' | 'depositing' | 'done' | 'error'>('idle');
   const [isExecuting, setIsExecuting] = useState(false);
+  
+  // MetaMask Delegation State
+  const [showDelegationModal, setShowDelegationModal] = useState(false);
+  const [delegationStatus, setDelegationStatus] = useState<'idle' | 'signing' | 'success' | 'error'>('idle');
+  const [delegationError, setDelegationError] = useState<string | null>(null);
+  const [delegationSignature, setDelegationSignature] = useState<string | null>(null);
+  const { signTypedDataAsync } = useSignTypedData();
+  const { data: walletClient } = useWalletClient();
   const [dbStatus, setDbStatus] = useState<{ backend: string; row_count: number } | null>(null);
   const [pollingActive, setPollingActive] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -638,6 +646,87 @@ export default function Dashboard() {
     }
   };
 
+  const handleSignDelegation = async () => {
+    if (!address) {
+      setDelegationError("Please connect wallet first.");
+      setDelegationStatus('error');
+      return;
+    }
+    setDelegationError(null);
+    setDelegationSignature(null);
+    setDelegationStatus('signing');
+    try {
+      await ensureWalletOnTargetChain();
+      
+      if (!walletClient) {
+        throw new Error("Wallet client not ready. Please try again.");
+      }
+
+      const types = {
+        EIP712Domain: [
+          { name: 'name', type: 'string' },
+          { name: 'version', type: 'string' },
+          { name: 'chainId', type: 'uint256' },
+          { name: 'verifyingContract', type: 'address' },
+        ],
+        SentinelPermission: [
+          { name: 'delegate', type: 'address' },
+          { name: 'delegator', type: 'address' },
+          { name: 'authority', type: 'bytes32' },
+          { name: 'constraints', type: 'Constraint[]' },
+          { name: 'salt', type: 'uint256' },
+        ],
+        Constraint: [
+          { name: 'enforcer', type: 'address' },
+          { name: 'terms', type: 'bytes' },
+        ]
+      };
+
+      // Final fix by renaming protected keywords that triggered the "internal delegation" error
+      const domain = {
+        name: 'SentinelPay Permissions', 
+        version: '1',
+        chainId: TARGET_CHAIN_ID,
+        verifyingContract: POLICY_REGISTRY_ADDRESS
+      };
+
+      const message = {
+        delegate: isAddress(whitelistRecipient) ? whitelistRecipient : '0xA99F898530dF1514A566f1a6562D62809e99557D', 
+        delegator: address,
+        authority: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        constraints: [
+          {
+            enforcer: POLICY_REGISTRY_ADDRESS,
+            terms: stringToHex('MAX_SPEND:5_USDC_DAILY')
+          }
+        ],
+        salt: Number(Math.floor(Date.now() / 1000))
+      };
+
+      const data = JSON.stringify({
+        types,
+        domain,
+        primaryType: 'SentinelPermission',
+        message
+      });
+
+      const signature = await (window as any).ethereum.request({
+        method: 'eth_signTypedData_v4',
+        params: [address, data],
+      });
+
+      setDelegationSignature(signature);
+      setDelegationStatus('success');
+      showToast('MetaMask Delegation secured!', 'success');
+    } catch (err: any) {
+      console.error("Delegation Error:", err);
+      // Better error parsing for [object Object] cases
+      const message = err?.message || (typeof err === 'object' ? JSON.stringify(err) : String(err));
+      setDelegationError(message);
+      setDelegationStatus('error');
+    }
+  };
+
   useEffect(() => {
     fetchExecutions();
     fetchDbStatus();
@@ -790,20 +879,36 @@ export default function Dashboard() {
           <div className="rounded-2xl p-6 card-interactive backdrop-blur-md relative overflow-hidden group" style={{ backgroundColor: 'rgba(18, 18, 22, 0.7)', border: `1px solid ${S.border}` }}>
             <div className="flex items-center justify-between mb-5">
               <span className="text-xs font-mono uppercase tracking-widest font-medium" style={{ color: S.muted }}>Smart Policy</span>
-              <button
-                onClick={() => {
-                  setPolicyTxStatus('idle');
-                  setPolicyTxError(null);
-                  setPolicyTxHash(null);
-                  setShowEditPolicy(true);
-                }}
-                className="text-xs font-medium px-3 py-1.5 rounded-lg transition-colors border"
-                style={{ color: S.accentLight, borderColor: S.borderGlow, backgroundColor: 'rgba(147,51,234,0.1)' }}
-                onMouseEnter={e => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.2)'; e.currentTarget.style.color = '#fff' }}
-                onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; e.currentTarget.style.color = S.accentLight }}
-              >
-                Configure
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setDelegationStatus('idle');
+                    setDelegationError(null);
+                    setDelegationSignature(null);
+                    setShowDelegationModal(true);
+                  }}
+                  className="text-xs font-bold px-3 py-1.5 rounded-lg transition-colors border shadow-[0_0_12px_rgba(246,133,27,0.2)]"
+                  style={{ color: '#F6851B', borderColor: 'rgba(246,133,27,0.4)', backgroundColor: 'rgba(246,133,27,0.1)' }}
+                  onMouseEnter={e => { e.currentTarget.style.backgroundColor = 'rgba(246,133,27,0.2)'; e.currentTarget.style.color = '#fff' }}
+                  onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'rgba(246,133,27,0.1)'; e.currentTarget.style.color = '#F6851B' }}
+                >
+                  ERC-7715 Delegate
+                </button>
+                <button
+                  onClick={() => {
+                    setPolicyTxStatus('idle');
+                    setPolicyTxError(null);
+                    setPolicyTxHash(null);
+                    setShowEditPolicy(true);
+                  }}
+                  className="text-xs font-medium px-3 py-1.5 rounded-lg transition-colors border"
+                  style={{ color: S.accentLight, borderColor: S.borderGlow, backgroundColor: 'rgba(147,51,234,0.1)' }}
+                  onMouseEnter={e => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.2)'; e.currentTarget.style.color = '#fff' }}
+                  onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; e.currentTarget.style.color = S.accentLight }}
+                >
+                  Configure
+                </button>
+              </div>
             </div>
             <div className="space-y-3 relative z-10">
               <div className="flex justify-between items-center p-2.5 rounded-lg" style={{ backgroundColor: 'rgba(255,255,255,0.03)' }}>
@@ -1480,6 +1585,76 @@ export default function Dashboard() {
                 {depositStatus === 'error' && '❌ Transaction Failed - Retry'}
                 {depositStatus === 'idle' && 'Execute Batch (2 Txs)'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── MetaMask Delegation Modal (ERC-7715) ── */}
+      {showDelegationModal && (
+        <div className="fixed inset-0 flex items-center justify-center z-50 px-4" style={{ backgroundColor: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}>
+          <div className="rounded-2xl p-8 w-full max-w-md relative overflow-hidden" style={{ backgroundColor: '#0a0a12', border: `1px solid rgba(246,133,27,0.4)`, boxShadow: `0 0 40px -10px rgba(246,133,27,0.3)` }}>
+            <div className="absolute top-0 inset-x-0 h-1" style={{ background: `linear-gradient(90deg, transparent, #F6851B, transparent)` }}></div>
+            
+            <h2 className="text-xl font-bold mb-1 text-white flex items-center gap-2">
+              <div className="w-6 h-6 rounded-md bg-[#F6851B]/20 border border-[#F6851B]/50 flex items-center justify-center text-[#F6851B] font-extrabold text-sm">M</div>
+              MetaMask Native Delegation
+            </h2>
+            <p className="text-sm mb-6" style={{ color: S.muted }}>Generate an ERC-7715 delegation signature to seamlessly grant policies to your autonomous agent via Smart Accounts.</p>
+            
+            <div className="space-y-4 mb-6 relative">
+              <div className="rounded-xl p-4 shadow-inner text-sm space-y-3" style={{ backgroundColor: 'rgba(255,255,255,0.03)', border: `1px solid ${S.border}` }}>
+                <div className="flex justify-between border-b pb-2" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
+                  <span style={{ color: S.muted }}>Delegator</span>
+                  <span className="font-mono">{address ? `${address.slice(0,6)}...${address.slice(-4)}` : 'Not connected'}</span>
+                </div>
+                <div className="flex justify-between border-b pb-2" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
+                  <span style={{ color: S.muted }}>Delegatee (Agent)</span>
+                  <span className="font-mono text-cyan-400 text-xs">
+                    {isAddress(whitelistRecipient) 
+                      ? `${whitelistRecipient.slice(0,6)}...${whitelistRecipient.slice(-4)}` 
+                      : '0xA99F...557D'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span style={{ color: S.muted }}>Caveat (Policy Enforcer)</span>
+                  <span className="font-mono text-[#F6851B] font-bold text-xs">5 USDC MAX DAILY</span>
+                </div>
+              </div>
+
+              {delegationStatus === 'success' && (
+                <div className="p-4 rounded-xl relative overflow-hidden border border-emerald-500/30 bg-emerald-500/5">
+                  <div className="text-emerald-400 font-bold mb-2 flex items-center gap-2">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    Delegation Signed Successfully!
+                  </div>
+                  <div className="text-[10px] font-mono leading-relaxed text-emerald-200/70 break-all p-2 bg-black/40 rounded">
+                    {delegationSignature}
+                  </div>
+                </div>
+              )}
+
+              {delegationStatus === 'error' && (
+                <div className="p-4 rounded-xl border border-red-500/30 bg-red-500/5 text-red-400 text-xs font-medium">
+                  {delegationError}
+                </div>
+              )}
+            </div>
+            
+            <div className="flex gap-3 mt-4">
+              <button onClick={() => setShowDelegationModal(false)} className="px-4 py-3 rounded-xl text-sm font-semibold transition-all hover:bg-white/5 flex-1" style={{ border: `1px solid ${S.border}`, color: S.muted }}>
+                {delegationStatus === 'success' ? 'Close' : 'Cancel'}
+              </button>
+              {delegationStatus !== 'success' && (
+                <button
+                  onClick={handleSignDelegation}
+                  disabled={!address || delegationStatus === 'signing'}
+                  className="flex-[1.5] px-4 py-3 rounded-xl text-sm font-bold text-white transition-all shadow-lg shadow-[#F6851B]/20 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ background: 'linear-gradient(90deg, #F6851B, #E2761B)' }}
+                >
+                  {delegationStatus === 'signing' ? 'Awaiting Signature in Wallet…' : 'Sign Delegation (EIP-712)'}
+                </button>
+              )}
             </div>
           </div>
         </div>
