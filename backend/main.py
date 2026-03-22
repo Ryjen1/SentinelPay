@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from urllib.parse import urlparse
 from web3 import Web3
 from eth_account import Account
-from eth_account.messages import encode_defunct
+from eth_account.messages import encode_defunct, encode_typed_data
 import traceback
 import httpx
 
@@ -1182,6 +1182,124 @@ async def require_wallet_signature(
         return
     if not x_wallet_address or not x_wallet_signature or not x_wallet_timestamp or not x_wallet_agent_id:
         raise HTTPException(status_code=401, detail={"error": "Missing wallet signature headers"})
+    if not Web3.is_address(x_wallet_address):
+        raise HTTPException(status_code=401, detail={"error": "Invalid wallet address"})
+    try:
+        ts = int(x_wallet_timestamp)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail={"error": "Invalid wallet signature timestamp"}) from exc
+    if abs(int(time.time()) - ts) > WALLET_SIGNATURE_MAX_SKEW_SECONDS:
+        raise HTTPException(status_code=401, detail={"error": "Wallet signature timestamp is outside allowed skew"})
+
+    message = _wallet_signature_message(
+        address=Web3.to_checksum_address(x_wallet_address),
+        timestamp=x_wallet_timestamp,
+        agent_id=x_wallet_agent_id,
+        path=request.url.path,
+    )
+    recovered = Account.recover_message(encode_defunct(text=message), signature=x_wallet_signature)
+    if recovered.lower() != x_wallet_address.lower():
+        raise HTTPException(status_code=401, detail={"error": "Invalid wallet signature"})
+
+
+def _verify_eip7715_delegation(
+    delegator: str,
+    delegate: str,
+    signature: str,
+    data: dict,
+) -> bool:
+    try:
+        # Match the frontend: SentinelPermission
+        types = {
+            "SentinelPermission": [
+                {"name": "delegate", "type": "address"},
+                {"name": "delegator", "type": "address"},
+                {"name": "authority", "type": "bytes32"},
+                {"name": "constraints", "type": "Constraint[]"},
+                {"name": "salt", "type": "uint256"},
+            ],
+            "Constraint": [
+                {"name": "enforcer", "type": "address"},
+                {"name": "terms", "type": "bytes"},
+            ]
+        }
+        
+        full_data = {
+            "types": types,
+            "domain": data.get("domain", {}),
+            "primaryType": "SentinelPermission",
+            "message": data.get("message", {}),
+        }
+        
+        encoded_data = encode_typed_data(full_message=full_data)
+        recovered_address = Account.recover_message(encoded_data, signature=signature)
+        
+        delegator_from_msg = data.get("message", {}).get("delegator")
+        if not delegator_from_msg:
+            print("[7715] No delegator in message")
+            return False
+        
+        if recovered_address.lower() != delegator_from_msg.lower():
+            print(f"[7715] Recovery mismatch: {recovered_address} != {delegator_from_msg}")
+            return False
+            
+        # CRITICAL SECURITY CHECK: The delegator in the signed message MUST be the wallet we are authenticating
+        if delegator_from_msg.lower() != delegator.lower():
+            print(f"[7715] Delegator mismatch: msg={delegator_from_msg}, current={delegator}")
+            return False
+            
+        # The delegate in the message must be the Relayer (Agent)
+        msg_delegate = data.get("message", {}).get("delegate", "").lower()
+        if msg_delegate != delegate.lower():
+             print(f"[7715] Delegate mismatch: msg={msg_delegate}, relayer={delegate}")
+             return False
+             
+        return True
+    except Exception as e:
+        print(f"[7715] Verification error: {e}")
+        return False
+
+
+async def require_wallet_signature(
+    request: Request,
+    x_wallet_address: Optional[str] = Header(None, alias="X-Wallet-Address"),
+    x_wallet_signature: Optional[str] = Header(None, alias="X-Wallet-Signature"),
+    x_wallet_timestamp: Optional[str] = Header(None, alias="X-Wallet-Timestamp"),
+    x_wallet_agent_id: Optional[str] = Header(None, alias="X-Wallet-Agent-Id"),
+    x_delegation_signature: Optional[str] = Header(None, alias="X-Delegation-Signature"),
+    x_delegation_data: Optional[str] = Header(None, alias="X-Delegation-Data"),
+) -> None:
+    if not REQUIRE_WALLET_SIGNATURE:
+        return
+
+    # Check for EIP-7715 Delegation FIRST (The "Opt-in" Flow)
+    if x_delegation_signature and x_delegation_data and x_wallet_address:
+        try:
+            delegation_json = json.loads(x_delegation_data)
+            # Use the Relayer's own address as the target delegate
+            # In SentinelPay, the relayer is the one executing.
+            relayer_address = account.address if account else ""
+            
+            if _verify_eip7715_delegation(
+                delegator=x_wallet_address,
+                delegate=relayer_address,
+                signature=x_delegation_signature,
+                data=delegation_json
+            ):
+                print(f"[auth] Valid EIP-7715 delegation from {x_wallet_address}. Bypassing interactive signature.")
+                return 
+            else:
+                print("[auth] Delegation provided but failed verification. Falling back to interactive.")
+        except Exception as e:
+            print(f"[auth] Delegation parse error: {e}")
+
+    # Fallback to standard Interactive Signature
+    if not x_wallet_address or not x_wallet_signature or not x_wallet_timestamp or not x_wallet_agent_id:
+        raise HTTPException(
+            status_code=401, 
+            detail={"error": "Missing authorization. Please provide a wallet signature or a valid ERC-7715 delegation."}
+        )
+    
     if not Web3.is_address(x_wallet_address):
         raise HTTPException(status_code=401, detail={"error": "Invalid wallet address"})
     try:
@@ -2749,6 +2867,7 @@ async def health():
         "wallet_signature_required": REQUIRE_WALLET_SIGNATURE,
         "payment_worker_enabled": PAYMENT_WORKER_ENABLED,
         "payment_worker_running": PAYMENT_WORKER_TASK is not None,
+        "relayer_address": account.address if account else None,
     }
 
 

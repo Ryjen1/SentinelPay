@@ -183,12 +183,13 @@ export default function Dashboard() {
   const [pauseTxPending, setPauseTxPending] = useState(false);
   const [depositStatus, setDepositStatus] = useState<'idle' | 'approving' | 'depositing' | 'done' | 'error'>('idle');
   const [isExecuting, setIsExecuting] = useState(false);
-  
+
   // MetaMask Delegation State
   const [showDelegationModal, setShowDelegationModal] = useState(false);
   const [delegationStatus, setDelegationStatus] = useState<'idle' | 'signing' | 'success' | 'error'>('idle');
   const [delegationError, setDelegationError] = useState<string | null>(null);
   const [delegationSignature, setDelegationSignature] = useState<string | null>(null);
+  const [delegationData, setDelegationData] = useState<{ domain: any, message: any } | null>(null);
   const { signTypedDataAsync } = useSignTypedData();
   const { data: walletClient } = useWalletClient();
   const [dbStatus, setDbStatus] = useState<{ backend: string; row_count: number } | null>(null);
@@ -200,7 +201,7 @@ export default function Dashboard() {
   const [agentTask, setAgentTask] = useState('');
   const [agentResult, setAgentResult] = useState<{ steps: string[]; tx_hash?: string | null } | null>(null);
   const [agentRunning, setAgentRunning] = useState(false);
-  const [healthStatus, setHealthStatus] = useState<{ status: string; network: string; database: string; mock_mode: boolean } | null>(null);
+  const [healthStatus, setHealthStatus] = useState<{ status: string; network: string; database: string; mock_mode: boolean; relayer_address?: string } | null>(null);
   const [weatherSnapshot, setWeatherSnapshot] = useState<WeatherSnapshotResponse | null>(null);
   const [weatherLoading, setWeatherLoading] = useState(false);
   const [weatherError, setWeatherError] = useState<string | null>(null);
@@ -452,10 +453,42 @@ export default function Dashboard() {
     setAgentRunning(true);
     setAgentResult(null);
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      
+      let walletSignature: string | undefined;
+      let walletTimestamp: string | undefined;
+
+      if (address && delegationSignature && delegationData) {
+        headers['X-Delegation-Signature'] = delegationSignature;
+        headers['X-Delegation-Data'] = JSON.stringify(delegationData);
+        headers['X-Wallet-Address'] = address;
+      } else if (address) {
+        // Fallback to interactive signature
+        walletTimestamp = String(Math.floor(Date.now() / 1000));
+        const walletMessage = [
+          'SentinelPay Demo Authorization',
+          `Address: ${address}`,
+          `AgentId: ${activeAgentId}`,
+          `Timestamp: ${walletTimestamp}`,
+          'Path: /agent-execute',
+        ].join('\n');
+
+        walletSignature = await (window as any).ethereum.request({
+          method: 'personal_sign',
+          params: [walletMessage, address],
+        });
+      }
+
       const res = await fetch('/api/agent-execute', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task: agentTask, agent_id: activeAgentId }),
+        headers,
+        body: JSON.stringify({ 
+          task: agentTask, 
+          agent_id: activeAgentId,
+          wallet_address: address,
+          wallet_signature: walletSignature,
+          wallet_timestamp: walletTimestamp
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({} as ApiErrorPayload));
@@ -476,10 +509,41 @@ export default function Dashboard() {
   const runDemoExecution = async () => {
     setIsExecuting(true);
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      
+      let walletSignature: string | undefined;
+      let walletTimestamp: string | undefined;
+
+      if (address && delegationSignature && delegationData) {
+        headers['X-Delegation-Signature'] = delegationSignature;
+        headers['X-Delegation-Data'] = JSON.stringify(delegationData);
+        headers['X-Wallet-Address'] = address;
+      } else if (address) {
+        // Fallback to interactive signature
+        walletTimestamp = String(Math.floor(Date.now() / 1000));
+        const walletMessage = [
+          'SentinelPay Demo Authorization',
+          `Address: ${address}`,
+          `AgentId: ${activeAgentId}`,
+          `Timestamp: ${walletTimestamp}`,
+          'Path: /execute-demo',
+        ].join('\n');
+
+        walletSignature = await (window as any).ethereum.request({
+          method: 'personal_sign',
+          params: [walletMessage, address],
+        });
+      }
+
       const res = await fetch('/api/demo-execute', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent_id: activeAgentId }),
+        headers,
+        body: JSON.stringify({ 
+          agent_id: activeAgentId,
+          wallet_address: address,
+          wallet_signature: walletSignature,
+          wallet_timestamp: walletTimestamp
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({} as ApiErrorPayload));
@@ -657,7 +721,7 @@ export default function Dashboard() {
     setDelegationStatus('signing');
     try {
       await ensureWalletOnTargetChain();
-      
+
       if (!walletClient) {
         throw new Error("Wallet client not ready. Please try again.");
       }
@@ -684,14 +748,16 @@ export default function Dashboard() {
 
       // Final fix by renaming protected keywords that triggered the "internal delegation" error
       const domain = {
-        name: 'SentinelPay Permissions', 
+        name: 'SentinelPay Permissions',
         version: '1',
         chainId: TARGET_CHAIN_ID,
         verifyingContract: POLICY_REGISTRY_ADDRESS
       };
 
+      const relayerAddress = healthStatus?.relayer_address || '0xA99F898530dF1514A566f1a6562D62809e99557D';
+
       const message = {
-        delegate: isAddress(whitelistRecipient) ? whitelistRecipient : '0xA99F898530dF1514A566f1a6562D62809e99557D', 
+        delegate: relayerAddress,
         delegator: address,
         authority: '0x0000000000000000000000000000000000000000000000000000000000000000',
         constraints: [
@@ -715,7 +781,17 @@ export default function Dashboard() {
         params: [address, data],
       });
 
+      const dData = { domain, message };
       setDelegationSignature(signature);
+      setDelegationData(dData);
+
+      // Persist to localStorage for "session-less" feel across refreshes
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(`sentinel_delegation_sig_${address.toLowerCase()}`, signature);
+        localStorage.setItem(`sentinel_delegation_data_${address.toLowerCase()}`, JSON.stringify(dData));
+      }
+
+      setDelegationStatus('success');
       setDelegationStatus('success');
       showToast('MetaMask Delegation secured!', 'success');
     } catch (err: any) {
@@ -726,6 +802,26 @@ export default function Dashboard() {
       setDelegationStatus('error');
     }
   };
+
+  useEffect(() => {
+    if (address && typeof window !== 'undefined') {
+      const savedSig = localStorage.getItem(`sentinel_delegation_sig_${address.toLowerCase()}`);
+      const savedData = localStorage.getItem(`sentinel_delegation_data_${address.toLowerCase()}`);
+      if (savedSig && savedData) {
+        setDelegationSignature(savedSig);
+        try {
+          setDelegationData(JSON.parse(savedData));
+          setDelegationStatus('success');
+        } catch (e) {
+          console.error("Failed to parse saved delegation data", e);
+        }
+      } else {
+        setDelegationSignature(null);
+        setDelegationData(null);
+        setDelegationStatus('idle');
+      }
+    }
+  }, [address]);
 
   useEffect(() => {
     fetchExecutions();
@@ -825,8 +921,8 @@ export default function Dashboard() {
             style={{ backgroundColor: 'rgba(18, 18, 22, 0.7)', border: `1px solid ${isPaused ? 'rgba(239,68,68,0.4)' : S.borderAccent}` }}
           >
             {/* Subtle background glow effect */}
-            <div className="absolute -top-10 -right-10 w-32 h-32 rounded-full opacity-20 blur-3xl pointer-events-none transition-opacity group-hover:opacity-40" 
-                 style={{ backgroundColor: S.accent }}></div>
+            <div className="absolute -top-10 -right-10 w-32 h-32 rounded-full opacity-20 blur-3xl pointer-events-none transition-opacity group-hover:opacity-40"
+              style={{ backgroundColor: S.accent }}></div>
 
             <div className="flex items-center justify-between mb-4 relative z-10">
               <span className="text-xs font-mono uppercase tracking-widest font-medium" style={{ color: S.muted }}>Agent Identity</span>
@@ -842,12 +938,12 @@ export default function Dashboard() {
                 {isPaused ? 'Paused' : 'Active'}
               </div>
             </div>
-            
+
             <Link href={`https://agentscan.xyz/agent/${activeAgentId}`} target="_blank" className="block mt-2 mb-5 group/link relative z-10">
               <div className="font-mono font-bold text-lg mb-1" style={{ color: S.textPrimary }}>{displayAgentId}</div>
               <div className="text-xs font-medium flex items-center gap-1 transition-colors group-hover/link:underline" style={{ color: S.accentLight }}>
                 View on AgentScan (optional)
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17l9.2-9.2M17 17V7H7"/></svg>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17l9.2-9.2M17 17V7H7" /></svg>
               </div>
             </Link>
 
@@ -943,7 +1039,7 @@ export default function Dashboard() {
                 onMouseEnter={e => (e.currentTarget.style.color = S.textPrimary)}
                 onMouseLeave={e => (e.currentTarget.style.color = S.muted)}
               >
-                Explorer <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 17l9.2-9.2M17 17V7H7"/></svg>
+                Explorer <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 17l9.2-9.2M17 17V7H7" /></svg>
               </a>
             </div>
             <div className="space-y-4">
@@ -979,9 +1075,9 @@ export default function Dashboard() {
                 <div
                   key={label}
                   className="rounded-xl p-4 text-center transition-all duration-300"
-                  style={{ 
-                    backgroundColor: ok ? 'rgba(16,217,129,0.05)' : 'rgba(239,68,68,0.05)', 
-                    border: `1px solid ${ok ? 'rgba(16,217,129,0.2)' : 'rgba(239,68,68,0.2)'}` 
+                  style={{
+                    backgroundColor: ok ? 'rgba(16,217,129,0.05)' : 'rgba(239,68,68,0.05)',
+                    border: `1px solid ${ok ? 'rgba(16,217,129,0.2)' : 'rgba(239,68,68,0.2)'}`
                   }}
                 >
                   <div className="flex justify-center mb-2">
@@ -1000,7 +1096,7 @@ export default function Dashboard() {
           <div className="rounded-2xl p-6 card-interactive backdrop-blur-md relative overflow-hidden" style={{ backgroundColor: 'rgba(18, 18, 22, 0.7)', border: `1px solid ${S.border}` }}>
             {/* Subtle background pattern */}
             <div className="absolute -right-16 -bottom-16 w-48 h-48 opacity-5 pointer-events-none" style={{ background: `radial-gradient(circle, ${S.textPrimary} 10%, transparent 10.5%)`, backgroundSize: '10px 10px' }}></div>
-            
+
             <span className="text-xs font-mono uppercase tracking-widest font-medium relative z-10" style={{ color: S.muted }}>Network Telemetry</span>
             {networkInfo ? (
               <div className="mt-5 space-y-3 relative z-10">
@@ -1168,9 +1264,9 @@ export default function Dashboard() {
                 onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; }}
               >
                 {isExecuting ? (
-                   <><div className="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: S.accentLight, borderTopColor: 'transparent' }}></div> Processing…</>
+                  <><div className="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: S.accentLight, borderTopColor: 'transparent' }}></div> Processing…</>
                 ) : (
-                   <><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Simulate Tx</>
+                  <><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Simulate Tx</>
                 )}
               </button>
               <button
@@ -1180,7 +1276,7 @@ export default function Dashboard() {
                 onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.1)')}
                 onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)')}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.59-9.5l5.65-5.65"/></svg>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.59-9.5l5.65-5.65" /></svg>
                 Sync
               </button>
             </div>
@@ -1201,7 +1297,7 @@ export default function Dashboard() {
           ) : transactions.length === 0 ? (
             <div className="p-16 text-center">
               <div className="w-16 h-16 mx-auto mb-4 rounded-full flex items-center justify-center" style={{ backgroundColor: 'rgba(147,51,234,0.1)', border: `1px solid ${S.borderGlow}` }}>
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={S.accent} strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={S.accent} strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
               </div>
               <div className="text-base font-bold mb-1" style={{ color: S.textPrimary }}>Awaiting Executions</div>
               <div className="text-sm" style={{ color: S.muted }}>Run the simulator or trigger the API to see live policy checks.</div>
@@ -1242,14 +1338,14 @@ export default function Dashboard() {
                       </td>
                       <td className="px-6 py-4 text-xs font-mono" style={{ color: S.muted }}>
                         {tx.status === 'failed' ? (
-                           <span className="opacity-50">N/A</span>
+                          <span className="opacity-50">N/A</span>
                         ) : (
                           `${tx.recipient?.slice(0, 6)}…${tx.recipient?.slice(-4)}`
                         )}
                       </td>
                       <td className="px-6 py-4 text-xs font-mono">
                         {tx.status === 'failed' && !tx.tx_hash?.startsWith('0x') ? (
-                           <span className="text-dim/40 italic">Internal Log</span>
+                          <span className="text-dim/40 italic">Internal Log</span>
                         ) : (
                           <a
                             href={tx.tx_url}
@@ -1261,7 +1357,7 @@ export default function Dashboard() {
                             onMouseLeave={e => (e.currentTarget.style.color = tx.status === 'failed' ? S.error : S.accentLight)}
                           >
                             {tx.tx_hash?.slice(0, 10)}…
-                            <svg className="opacity-0 group-hover/hash:opacity-100 transition-opacity" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 17l9.2-9.2M17 17V7H7"/></svg>
+                            <svg className="opacity-0 group-hover/hash:opacity-100 transition-opacity" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 17l9.2-9.2M17 17V7H7" /></svg>
                           </a>
                         )}
                       </td>
@@ -1338,11 +1434,11 @@ export default function Dashboard() {
         <div className="rounded-2xl p-6 relative overflow-hidden backdrop-blur-md" style={{ backgroundColor: 'rgba(18, 18, 22, 0.7)', border: `1px solid ${S.borderAccent}` }}>
           {/* Subtle grid background for the "Terminal" feel */}
           <div className="absolute inset-0 bg-grid opacity-20 pointer-events-none"></div>
-          
+
           <div className="relative z-10 flex items-center justify-between mb-6">
             <div className="flex items-center gap-4">
               <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border shadow-[0_0_15px_rgba(147,51,234,0.3)]" style={{ backgroundColor: 'rgba(147,51,234,0.1)', borderColor: S.borderGlow }}>
-                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={S.accentLight} strokeWidth="2"><path d="M12 2a2 2 0 0 1 2 2c0 1.1-.9 2-2 2a2 2 0 0 1-2-2c0-1.1.9-2 2-2zm0 6a4 4 0 1 1 0 8 4 4 0 0 1 0-8zm-6 4H2zm20 0h-4zM6 16v4zm12 0v4H6z"/></svg>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={S.accentLight} strokeWidth="2"><path d="M12 2a2 2 0 0 1 2 2c0 1.1-.9 2-2 2a2 2 0 0 1-2-2c0-1.1.9-2 2-2zm0 6a4 4 0 1 1 0 8 4 4 0 0 1 0-8zm-6 4H2zm20 0h-4zM6 16v4zm12 0v4H6z" /></svg>
               </div>
               <div>
                 <div className="font-bold text-base mb-0.5 text-white tracking-wide">Autonomous Operations Terminal</div>
@@ -1390,7 +1486,7 @@ export default function Dashboard() {
               <ul className="space-y-2">
                 {agentResult.steps.map((step, idx) => (
                   <li key={idx} className="text-xs font-mono" style={{ color: '#a1a1aa' }}>
-                    <span className="mr-2" style={{ color: '#4c1d95' }}>[{String(idx+1).padStart(2, '0')}]</span> {step}
+                    <span className="mr-2" style={{ color: '#4c1d95' }}>[{String(idx + 1).padStart(2, '0')}]</span> {step}
                   </li>
                 ))}
               </ul>
@@ -1413,17 +1509,17 @@ export default function Dashboard() {
       </div>
 
       {/* ── Edit Policy Modal ── */}
-          {showEditPolicy && (
+      {showEditPolicy && (
         <div className="fixed inset-0 flex items-center justify-center z-50 px-4" style={{ backgroundColor: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}>
           <div className="rounded-2xl p-8 w-full max-w-md relative overflow-hidden" style={{ backgroundColor: '#0a0a12', border: `1px solid ${S.borderAccent}`, boxShadow: `0 0 40px -10px ${S.borderAccent}` }}>
             <div className="absolute top-0 inset-x-0 h-1" style={{ background: `linear-gradient(90deg, transparent, ${S.accent}, transparent)` }}></div>
-            
+
             <h2 className="text-xl font-bold mb-1 text-white flex items-center gap-2">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={S.accentLight} strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={S.accentLight} strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
               Smart Policy Config
             </h2>
             <p className="text-sm mb-6" style={{ color: S.muted }}>On-chain parameters require policy owner signature.</p>
-            
+
             <div className="space-y-5 mb-6">
               {[
                 { label: 'Max Per Transaction (USDC)', value: maxPerTx, set: setMaxPerTx, type: 'number' },
@@ -1464,7 +1560,7 @@ export default function Dashboard() {
                 </div>
               </div>
             </div>
-            
+
             <div className="text-xs p-4 rounded-xl mb-6 flex gap-3 items-start" style={{ backgroundColor: 'rgba(234,179,8,0.05)', border: '1px solid rgba(234,179,8,0.2)', color: '#FCD34D' }}>
               <svg className="shrink-0 mt-0.5" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
               <p className="leading-relaxed">This update modifies the PolicyRegistry parameters. You will be prompted to sign a transaction.</p>
@@ -1490,7 +1586,7 @@ export default function Dashboard() {
                 )}
               </div>
             )}
-            
+
             <div className="flex gap-3">
               <button onClick={() => setShowEditPolicy(false)} className="flex-1 px-4 py-3 rounded-xl text-sm font-semibold transition-all hover:bg-white/5" style={{ border: `1px solid ${S.border}`, color: S.muted }}>
                 Cancel
@@ -1516,7 +1612,7 @@ export default function Dashboard() {
         <div className="fixed inset-0 flex items-center justify-center z-50 px-4" style={{ backgroundColor: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}>
           <div className="rounded-2xl p-8 w-full max-w-md relative overflow-hidden" style={{ backgroundColor: '#0a0a12', border: `1px solid ${S.borderAccent}`, boxShadow: `0 0 40px -10px ${S.borderAccent}` }}>
             <div className="absolute top-0 inset-x-0 h-1" style={{ background: `linear-gradient(90deg, transparent, ${S.success}, transparent)` }}></div>
-            
+
             <h2 className="text-xl font-bold mb-1 text-white flex items-center gap-2">
               <div className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></div>
               Fund SentinelVault
@@ -1524,7 +1620,7 @@ export default function Dashboard() {
             <p className="text-sm mb-6" style={{ color: S.muted }}>
               Deposit USDC for the AI agent to draw from.
             </p>
-            
+
             <div className="mb-6">
               <label className="text-xs font-semibold mb-2 block uppercase tracking-wider" style={{ color: S.textPrimary }}>Deposit Amount (USDC)</label>
               <div className="relative">
@@ -1540,7 +1636,7 @@ export default function Dashboard() {
                 />
               </div>
             </div>
-            
+
             <div className="rounded-xl p-4 mb-6 space-y-3 shadow-inner" style={{ backgroundColor: 'rgba(255,255,255,0.02)', border: `1px solid ${S.border}` }}>
               {[
                 ['Destination', `Vault: ${VAULT_ADDRESS.slice(0, 6)}...${VAULT_ADDRESS.slice(-4)}`],
@@ -1549,23 +1645,23 @@ export default function Dashboard() {
               ].map(([k, v]) => (
                 <div key={k} className="flex justify-between items-center text-sm">
                   <span style={{ color: S.muted }}>{k}</span>
-                  <span className="font-mono font-medium" style={{ color: k==='Asset'?S.textPrimary:S.accentLight }}>{v}</span>
+                  <span className="font-mono font-medium" style={{ color: k === 'Asset' ? S.textPrimary : S.accentLight }}>{v}</span>
                 </div>
               ))}
             </div>
-            
+
             <div className="text-xs p-4 rounded-xl mb-6 flex gap-3 items-center" style={{ color: S.muted, backgroundColor: 'rgba(255,255,255,0.03)', border: `1px solid ${S.border}` }}>
-               <div className="flex gap-2 items-center flex-1">
-                 <div className="w-5 h-5 rounded flex items-center justify-center bg-white/10 font-bold text-[10px] text-white">1</div>
-                 <span>Approve</span>
-               </div>
-               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-               <div className="flex gap-2 items-center flex-1 justify-end">
-                 <div className="w-5 h-5 rounded flex items-center justify-center bg-white/10 font-bold text-[10px] text-white">2</div>
-                 <span>Deposit</span>
-               </div>
+              <div className="flex gap-2 items-center flex-1">
+                <div className="w-5 h-5 rounded flex items-center justify-center bg-white/10 font-bold text-[10px] text-white">1</div>
+                <span>Approve</span>
+              </div>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+              <div className="flex gap-2 items-center flex-1 justify-end">
+                <div className="w-5 h-5 rounded flex items-center justify-center bg-white/10 font-bold text-[10px] text-white">2</div>
+                <span>Deposit</span>
+              </div>
             </div>
-            
+
             <div className="flex gap-3">
               <button onClick={() => setShowFundVault(false)} className="px-4 py-3 rounded-xl text-sm font-semibold transition-all hover:bg-white/5" style={{ border: `1px solid ${S.border}`, color: S.muted }}>
                 Cancel
@@ -1574,7 +1670,7 @@ export default function Dashboard() {
                 onClick={handleDeposit}
                 disabled={!address || depositStatus === 'approving' || depositStatus === 'depositing'}
                 className="flex-1 px-4 py-3 rounded-xl text-sm font-bold text-white transition-all shadow-lg flex items-center justify-center gap-2 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0"
-                style={{ 
+                style={{
                   background: depositStatus === 'error' ? 'linear-gradient(90deg, #ef4444, #b91c1c)' : 'linear-gradient(90deg, #10b981, #059669)',
                   boxShadow: depositStatus === 'error' ? '0 4px 15px rgba(239,68,68,0.3)' : '0 4px 15px rgba(16,217,129,0.3)'
                 }}
@@ -1595,24 +1691,24 @@ export default function Dashboard() {
         <div className="fixed inset-0 flex items-center justify-center z-50 px-4" style={{ backgroundColor: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}>
           <div className="rounded-2xl p-8 w-full max-w-md relative overflow-hidden" style={{ backgroundColor: '#0a0a12', border: `1px solid rgba(246,133,27,0.4)`, boxShadow: `0 0 40px -10px rgba(246,133,27,0.3)` }}>
             <div className="absolute top-0 inset-x-0 h-1" style={{ background: `linear-gradient(90deg, transparent, #F6851B, transparent)` }}></div>
-            
+
             <h2 className="text-xl font-bold mb-1 text-white flex items-center gap-2">
               <div className="w-6 h-6 rounded-md bg-[#F6851B]/20 border border-[#F6851B]/50 flex items-center justify-center text-[#F6851B] font-extrabold text-sm">M</div>
               MetaMask Native Delegation
             </h2>
             <p className="text-sm mb-6" style={{ color: S.muted }}>Generate an ERC-7715 delegation signature to seamlessly grant policies to your autonomous agent via Smart Accounts.</p>
-            
+
             <div className="space-y-4 mb-6 relative">
               <div className="rounded-xl p-4 shadow-inner text-sm space-y-3" style={{ backgroundColor: 'rgba(255,255,255,0.03)', border: `1px solid ${S.border}` }}>
                 <div className="flex justify-between border-b pb-2" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
                   <span style={{ color: S.muted }}>Delegator</span>
-                  <span className="font-mono">{address ? `${address.slice(0,6)}...${address.slice(-4)}` : 'Not connected'}</span>
+                  <span className="font-mono">{address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'Not connected'}</span>
                 </div>
                 <div className="flex justify-between border-b pb-2" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
                   <span style={{ color: S.muted }}>Delegatee (Agent)</span>
                   <span className="font-mono text-cyan-400 text-xs">
-                    {isAddress(whitelistRecipient) 
-                      ? `${whitelistRecipient.slice(0,6)}...${whitelistRecipient.slice(-4)}` 
+                    {isAddress(whitelistRecipient)
+                      ? `${whitelistRecipient.slice(0, 6)}...${whitelistRecipient.slice(-4)}`
                       : '0xA99F...557D'}
                   </span>
                 </div>
@@ -1640,7 +1736,7 @@ export default function Dashboard() {
                 </div>
               )}
             </div>
-            
+
             <div className="flex gap-3 mt-4">
               <button onClick={() => setShowDelegationModal(false)} className="px-4 py-3 rounded-xl text-sm font-semibold transition-all hover:bg-white/5 flex-1" style={{ border: `1px solid ${S.border}`, color: S.muted }}>
                 {delegationStatus === 'success' ? 'Close' : 'Cancel'}

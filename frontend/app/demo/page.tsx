@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import Navbar from '@/components/Navbar';
 import { useAccount, useReadContract, useSignMessage } from 'wagmi';
@@ -44,6 +44,7 @@ type HealthResponse = {
   payment_worker_enabled?: boolean;
   payment_worker_running?: boolean;
   dead_letter_count_probe?: number;
+  relayer_address?: string;
 };
 
 type NetworkInfoResponse = {
@@ -112,6 +113,8 @@ export default function Demo() {
     blockNumber?: number;
     gasUsed?: number;
   } | null>(null);
+  const [delegationSignature, setDelegationSignature] = useState<string | null>(null);
+  const [delegationData, setDelegationData] = useState<{ domain: any, message: any } | null>(null);
   const { address, isConnected } = useAccount();
   const agentId = address ? `${DEFAULT_AGENT_ID}_${address.toLowerCase()}` : DEFAULT_AGENT_ID;
   const backendBaseUrl = (process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://127.0.0.1:8000').replace(/\/+$/, '');
@@ -179,6 +182,26 @@ export default function Demo() {
     ].join('\n');
   };
 
+  // Sync delegation from localStorage whenever address changes
+  useEffect(() => {
+    if (typeof window !== 'undefined' && address) {
+      const savedSig = localStorage.getItem(`sentinel_delegation_sig_${address.toLowerCase()}`);
+      const savedData = localStorage.getItem(`sentinel_delegation_data_${address.toLowerCase()}`);
+      if (savedSig && savedData) {
+        setDelegationSignature(savedSig);
+        try {
+          setDelegationData(JSON.parse(savedData));
+        } catch { }
+      } else {
+        setDelegationSignature(null);
+        setDelegationData(null);
+      }
+    } else {
+      setDelegationSignature(null);
+      setDelegationData(null);
+    }
+  }, [address]);
+
   const runDemo = async () => {
     setLogs([]);
     setDone(false);
@@ -187,7 +210,7 @@ export default function Demo() {
     setLastTxUrl(null);
     setLastTxHash(null);
     setLastMeta(null);
- 
+
     try {
       if (!isConnected || !address) {
         appendLog('> Wallet not connected. Please connect your wallet to run the demo.', 'error');
@@ -220,7 +243,13 @@ export default function Demo() {
           'success'
         );
         if (health.wallet_signature_required) {
-          appendLog('> Wallet signature required: yes', 'success');
+          if (delegationSignature && delegationData) {
+            appendLog('> Wallet signature required: no (delegated)', 'success');
+          } else {
+            appendLog('> Wallet signature required: yes', 'success');
+          }
+        } else {
+          appendLog('> Wallet signature required: no', 'success');
         }
       } else {
         appendLog('> Health: unavailable (check backend)', 'warning');
@@ -249,23 +278,30 @@ export default function Demo() {
       await sleep(900);
       appendLog(`> Wallet: ${address.slice(0, 6)} ... ${address.slice(-4)}`, 'info');
       await sleep(900);
-      appendLog('> Awaiting wallet signature...', 'info');
-      const walletTimestamp = String(Math.floor(Date.now() / 1000));
-      const walletMessage = buildWalletMessage(address, walletTimestamp);
-      let walletSignature: string;
-      try {
-        walletSignature = await signMessageAsync({ message: walletMessage });
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        appendLog(`> Wallet signature rejected: ${message}`, 'error');
-        await sleep(600);
-        appendLog('---', 'muted');
-        appendLog('> Session complete.', 'info');
-        setRunStatus('error');
-        setDone(true);
-        return;
+      let walletSignature: string = '';
+      let walletTimestamp: string = '';
+
+      if (delegationSignature && delegationData) {
+        appendLog('> Detected valid ERC-7715 Delegation. Bypassing interactive signature.', 'success');
+        await sleep(500);
+      } else {
+        appendLog('> Awaiting wallet signature...', 'info');
+        walletTimestamp = String(Math.floor(Date.now() / 1000));
+        const walletMessage = buildWalletMessage(address, walletTimestamp);
+        try {
+          walletSignature = await signMessageAsync({ message: walletMessage });
+          appendLog('> Wallet signature captured.', 'success');
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          appendLog(`> Wallet signature rejected: ${message}`, 'error');
+          await sleep(600);
+          appendLog('---', 'muted');
+          appendLog('> Session complete.', 'info');
+          setRunStatus('error');
+          setDone(true);
+          return;
+        }
       }
-      appendLog('> Wallet signature captured.', 'success');
       let weatherLocation: { lat: number; lon: number } | null = null;
       if (selectedActions.includes('weather') && useDeviceLocation) {
         appendLog('> Requesting device location...', 'info');
@@ -282,20 +318,27 @@ export default function Demo() {
       await sleep(700);
 
       // Perform real execution
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (delegationSignature && delegationData) {
+        headers['X-Delegation-Signature'] = delegationSignature;
+        headers['X-Delegation-Data'] = JSON.stringify(delegationData);
+        headers['X-Wallet-Address'] = address;
+      }
+
       const res = await fetch('/api/demo-execute', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           agent_id: agentId,
           actions: selectedActions,
           weather_lat: weatherLocation?.lat,
           weather_lon: weatherLocation?.lon,
-          wallet_address: address,
-          wallet_signature: walletSignature,
-          wallet_timestamp: walletTimestamp,
+          wallet_address: !delegationSignature ? address : undefined,
+          wallet_signature: !delegationSignature ? walletSignature : undefined,
+          wallet_timestamp: !delegationSignature ? walletTimestamp : undefined,
         }),
       });
-      
+
       const data: DemoExecuteResponse = await res.json().catch(() => null);
       const errorMsg = extractErrorMessage(data);
 
@@ -514,11 +557,10 @@ export default function Demo() {
               <button
                 key={option.key}
                 onClick={() => setDemoMode(option.key as typeof demoMode)}
-                className={`text-xs px-4 py-2 rounded-lg border transition ${
-                  active
-                    ? 'bg-cyan-500/10 border-cyan-400 text-cyan-300'
-                    : 'bg-white/[0.02] border-white/[0.08] text-slate-400 hover:text-white'
-                }`}
+                className={`text-xs px-4 py-2 rounded-lg border transition ${active
+                  ? 'bg-cyan-500/10 border-cyan-400 text-cyan-300'
+                  : 'bg-white/[0.02] border-white/[0.08] text-slate-400 hover:text-white'
+                  }`}
               >
                 {option.label}
               </button>
@@ -567,16 +609,14 @@ export default function Demo() {
 
           {done && (
             <div
-              className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border ${
-                runStatus === 'error'
-                  ? 'bg-rose-500/[0.07] border-rose-500/20 text-rose-300'
-                  : 'bg-emerald-500/[0.07] border-emerald-500/20 text-emerald-400'
-              }`}
+              className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border ${runStatus === 'error'
+                ? 'bg-rose-500/[0.07] border-rose-500/20 text-rose-300'
+                : 'bg-emerald-500/[0.07] border-emerald-500/20 text-emerald-400'
+                }`}
             >
               <div
-                className={`w-1.5 h-1.5 rounded-full ${
-                  runStatus === 'error' ? 'bg-rose-400' : 'bg-emerald-400'
-                }`}
+                className={`w-1.5 h-1.5 rounded-full ${runStatus === 'error' ? 'bg-rose-400' : 'bg-emerald-400'
+                  }`}
               />
               {runStatus === 'error' ? 'Run blocked by policy' : 'Live run complete'}
             </div>
