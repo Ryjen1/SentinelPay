@@ -10,7 +10,7 @@ import Navbar from '@/components/Navbar';
 // ── Contract addresses (Celo Sepolia by default) ─────────────────────────
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_AGENT_VAULT || '0x0000000000000000000000000000000000000000') as `0x${string}`;
 const USDC_ADDRESS = (process.env.NEXT_PUBLIC_USDC || '0x0000000000000000000000000000000000000000') as `0x${string}`;
-const DEFAULT_AGENT_ID = process.env.NEXT_PUBgLIC_AGENT_ID ?? 'weather_agent';
+const DEFAULT_AGENT_ID = process.env.NEXT_PUBLIC_AGENT_ID ?? 'weather_agent';
 const NETWORK_LABEL = process.env.NEXT_PUBLIC_NETWORK_LABEL ?? 'Celo Sepolia Testnet';
 const EXPLORER_BASE_URL = process.env.NEXT_PUBLIC_EXPLORER_BASE_URL ?? 'https://sepolia.celoscan.io';
 const TARGET_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? '11142220');
