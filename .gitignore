@@ -1,3 +1,4 @@
+# Core
 .env
 .env.*.vercel
 .env.vercel
@@ -12,8 +13,30 @@ __pycache__/
 *.db
 artifacts/
 cache/
-deployed-addresses.json
 venv/
 backend/venv/
 backend/db/transactions.db
 .vercel
+
+# Temporary Hackathon/Dev Files
+*.json
+!package.json
+!tsconfig.json
+!next.config.mjs
+!agent-metadata.json
+!deployed-addresses.json
+!frontend/app/dashboard/metadata.json
+!frontend/app/layout/metadata.json
+*.sh
+*.md
+!README.md
+!AGENTS.md
+!docs/*.md
+!tweet.md
+!frontend/app/**/*.md
+!hackathon_integrations/**/*.md
+tweet.md
+karma_milestones.md
+fetch_all_tracks.py
+backend/scripts/nanobot_config.json
+backend/scripts/test_nonce_retry.py

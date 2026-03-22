@@ -74,6 +74,47 @@ Any protocol or marketplace on Celo can **discover, verify, and trust** Sentinel
 
 ---
 
+## 🌍 Ecosystem & Standards Compatibility
+
+SentinelPay is designed to be a universal security layer that integrates seamlessly with the leading standards in the agentic Web3 ecosystem.
+
+### 🛡️ Core Protocol Standards
+- **ERC-8004 (Agent Identity):** Every SentinelPay agent is registered with a verifiable on-chain identity, ensuring discoverability and trust across the Celo ecosystem.
+- **ERC-7715 (Omni-Delegation):** Native support for intent-based permissions, allowing users to grant granular authority to agents without sacrificing custodial control.
+- **USDC-Native (Stable Commerce):** Hard-coded support for USDC on Celo Sepolia to ensure policies are deterministic and stable.
+
+---
+
+## 🤝 Native Integrations
+
+We provide first-class support for ecosystem partners to create a more secure and composable operating environment for AI agents.
+
+### 🦊 MetaMask Delegation Framework
+Users can generate **EIP-712 Delegation Signatures** directly from the SentinelPay Dashboard. These follow the **ERC-7715 standard**, enabling the agent to operate within strict boundary-specific caveats (e.g., $5 max daily spend) compatible with modern Smart Accounts.
+
+### ⛽ Status Network Telemetry
+To provide an immutable and cost-effective audit trail, SentinelPay mirrors agent decision logs on the **Status Network Sepolia Testnet**. By utilizing **`gasPrice = 0`**, we ensure that high-frequency agent telemetry is permanently recorded on-chain without infrastructure overhead.
+
+---
+
+### SentinelPay MCP Server (Zero-Config Integration)
+To allow *any* agent (OpenClaw, ElizaOS, Nanobot, Cursor) to use SentinelPay without writing custom integration code, we have built a **Model Context Protocol (MCP)** server.
+
+#### Running with Nanobot
+The fastest way to join The Synthesis is to run our MCP server and point your agent at the hackathon skill file:
+
+1. Copy the example Nanobot config (remember to add your LLM API key):
+```bash
+cp backend/scripts/nanobot_config.json ~/.nanobot/config.json
+```
+2. Start Nanobot and register for the hackathon:
+```bash
+nanobot agent "join this hackathon -> https://synthesis.md/skill.md"
+```
+Your agent now has a secure, Celo-backed financial layer and is officially registered for The Synthesis!
+
+---
+
 ## 🎮 The "Rogue Agent" Demo
 
 We've battle-tested SentinelPay with a "Rogue Agent" simulator. Watch it in action!
